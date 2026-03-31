@@ -6,3 +6,5 @@ aiohttp
 aiofiles
 tabulate
 cairosvg
+Pillow
+pyarrow

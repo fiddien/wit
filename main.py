@@ -9,7 +9,8 @@ Steps:
 Each step is idempotent; re-running skips already-completed work.
 
 Supported datasets (--dataset):
-  wit             Wikipedia-based Image Text (WIT) — SEA languages via GCS
+  wit               Wikipedia-based Image Text (WIT) — SEA languages via GCS
+  cultural-ground   CulturalGround VQA — SEA languages via HuggingFace
 """
 
 import argparse
@@ -29,13 +30,14 @@ from compute_stats import compute_all_stats, display_stats
 from convert_to_webdataset import convert_all
 
 # Registry of supported datasets.  Each entry must expose:
-#   LANGUAGES          dict[str, str]  language code -> human name
-#   download_all       callable        see datasets/wit/download.py for signature
-# WIT-specific extras (WIT_QUICKSTART_FILE, WIT_TRAIN_FILES) are imported lazily.
+#   LANGUAGES     dict[str, str]  language code -> human name
+#   download_all  callable        downloads metadata; see each datasets/<name>/download.py
 import datasets.wit as _wit
+import datasets.cultural_ground as _cg
 
 DATASET_REGISTRY = {
     "wit": _wit,
+    "cultural-ground": _cg,
 }
 
 logging.basicConfig(
@@ -149,13 +151,15 @@ def main() -> None:
             max_samples=args.max_samples,
             seed=args.seed,
         )
+        cache_dir = args.cache_dir if str(args.cache_dir) else None
         if args.dataset == "wit":
             if args.quick_start:
                 logger.info("Quick-start mode: using 1%% sample file")
                 download_kwargs["source_files"] = [dataset.WIT_QUICKSTART_FILE]
             else:
                 download_kwargs["source_files"] = dataset.WIT_TRAIN_FILES
-            cache_dir = args.cache_dir if str(args.cache_dir) else None
+            download_kwargs["cache_dir"] = cache_dir
+        elif args.dataset == "cultural-ground":
             download_kwargs["cache_dir"] = cache_dir
 
         results = dataset.download_all(**download_kwargs)
