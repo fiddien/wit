@@ -74,11 +74,12 @@ async def _fetch_image_bytes(
             img.save(buf, format="JPEG", quality=90)
             return buf.getvalue()
         except asyncio.TimeoutError:
-            logger.debug("Timeout on attempt %d for %s", attempt, url)
+            logger.warning("Timeout on attempt %d for %s", attempt, url)
         except Exception as exc:
-            logger.debug("Error on attempt %d for %s: %s", attempt, url, exc)
+            logger.warning("Error on attempt %d for %s: %s", attempt, url, exc)
         if attempt < MAX_RETRIES:
             await asyncio.sleep(RETRY_BACKOFF * attempt)
+    logger.debug("All retries exhausted for %s", url)
     return None
 
 
@@ -151,6 +152,7 @@ async def convert_language(
 
     async def _bounded_fetch(session, url):
         async with semaphore:
+            await asyncio.sleep(0.05)  # to avoid rate-limiting
             return await _fetch_image_bytes(session, url)
 
     downloaded = 0
