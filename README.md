@@ -65,18 +65,6 @@ python main.py --output-dir /path/to/data
 python main.py --workers 20
 ```
 
-### Run Individual Steps
-
-```bash
-# 1. Download and filter WIT metadata
-python download_wit.py --output-dir data --max-samples 100000
-
-# 2. Convert to WebDataset (downloads images)
-python convert_to_webdataset.py --input-dir data --output-dir data --workers 10
-
-# 3. Compute and display statistics
-python compute_stats.py --data-dir data
-```
 
 ## Dataset Source
 
