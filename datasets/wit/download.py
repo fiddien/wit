@@ -84,8 +84,9 @@ class ReservoirSampler:
 # Progress helpers
 # ---------------------------------------------------------------------------
 
-def _load_progress(output_dir: Path) -> dict:
-    p = output_dir / _PROGRESS_FILE
+def _load_progress(cache_dir: Path) -> dict:
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    p = cache_dir / _PROGRESS_FILE
     if p.exists():
         try:
             return json.loads(p.read_text())
@@ -94,8 +95,9 @@ def _load_progress(output_dir: Path) -> dict:
     return {}
 
 
-def _save_progress(output_dir: Path, progress: dict) -> None:
-    p = output_dir / _PROGRESS_FILE
+def _save_progress(cache_dir: Path, progress: dict) -> None:
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    p = cache_dir / _PROGRESS_FILE
     p.write_text(json.dumps(progress, indent=2))
 
 
@@ -191,7 +193,8 @@ def download_all(
     re-used on subsequent runs (resumable .part files handle interruptions).
     """
     output_dir.mkdir(parents=True, exist_ok=True)
-    progress = _load_progress(output_dir)
+    _cache_dir = cache_dir or DEFAULT_CACHE_DIR
+    progress = _load_progress(_cache_dir)
 
     pending: list[str] = []
     results: dict[str, Path] = {}
@@ -246,11 +249,11 @@ def download_all(
             pbar.close()
         except Exception:
             logger.exception("Error on shard %d — will retry on next run", shard_idx)
-            _save_progress(output_dir, {**progress, progress_key: completed_shards})
+            _save_progress(_cache_dir, {**progress, progress_key: completed_shards})
             continue
 
         completed_shards.append(shard_idx)
-        _save_progress(output_dir, {**progress, progress_key: completed_shards})
+        _save_progress(_cache_dir, {**progress, progress_key: completed_shards})
         for lang, sampler in samplers.items():
             logger.info(
                 "  [%s] rows seen: %d  reservoir: %d",
@@ -274,7 +277,7 @@ def download_all(
         logger.info("Saved -> %s", out_path)
         results[lang] = out_path
 
-    progress_file = output_dir / _PROGRESS_FILE
+    progress_file = _cache_dir / _PROGRESS_FILE
     if progress_file.exists():
         progress_file.unlink()
 
