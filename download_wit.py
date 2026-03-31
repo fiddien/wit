@@ -120,19 +120,26 @@ def _fetch_to_cache(url: str, cache_dir: Path) -> Path:
         logger.info("Cache hit: %s", dest)
         return dest
 
+    # Clean up any stale .part file from a previous interrupted download.
+    part.unlink(missing_ok=True)
+
     logger.info("Downloading %s → %s", url, dest)
     headers = {"User-Agent": "wit-sea-downloader/1.0"}
-    with requests.get(url, stream=True, timeout=REQUEST_TIMEOUT, headers=headers) as resp:
-        resp.raise_for_status()
-        total = int(resp.headers.get("content-length", 0)) or None
-        with part.open("wb") as f:
-            with tqdm(total=total, unit="B", unit_scale=True,
-                      desc=filename, leave=False) as pbar:
-                for chunk in resp.iter_content(chunk_size=1 << 20):  # 1 MB chunks
-                    f.write(chunk)
-                    pbar.update(len(chunk))
+    try:
+        with requests.get(url, stream=True, timeout=REQUEST_TIMEOUT, headers=headers) as resp:
+            resp.raise_for_status()
+            total = int(resp.headers.get("content-length", 0)) or None
+            with part.open("wb") as f:
+                with tqdm(total=total, unit="B", unit_scale=True,
+                          desc=filename, leave=False) as pbar:
+                    for chunk in resp.iter_content(chunk_size=1 << 20):  # 1 MB chunks
+                        f.write(chunk)
+                        pbar.update(len(chunk))
+        part.rename(dest)
+    except Exception:
+        part.unlink(missing_ok=True)
+        raise
 
-    part.rename(dest)
     logger.info("Cached → %s (%.1f MB)", dest, dest.stat().st_size / 1e6)
     return dest
 
