@@ -21,6 +21,8 @@ from config import (
     DEFAULT_SHARD_SIZE,
     DEFAULT_WORKERS,
     SEA_LANGUAGES,
+    WIT_QUICKSTART_FILE,
+    WIT_TRAIN_FILES,
 )
 from compute_stats import compute_all_stats, display_stats
 from convert_to_webdataset import convert_all
@@ -90,6 +92,14 @@ def parse_args() -> argparse.Namespace:
         default=42,
         help="Random seed for sampling",
     )
+    parser.add_argument(
+        "--quick-start",
+        action="store_true",
+        help=(
+            "Use the 1%% sample TSV (~370K rows, ~250 MB) instead of the full "
+            "10-shard dataset. Useful for testing the pipeline end-to-end."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -103,11 +113,17 @@ def main() -> None:
 
     if "download" in args.steps:
         logger.info("=== Step 1/3: Download WIT metadata ===")
+        if args.quick_start:
+            logger.info("Quick-start mode: using 1%% sample file (%s)", WIT_QUICKSTART_FILE)
+            source_files = [WIT_QUICKSTART_FILE]
+        else:
+            source_files = WIT_TRAIN_FILES
         results = download_all(
             output_dir=args.output_dir,
             languages=args.languages,
             max_samples=args.max_samples,
             seed=args.seed,
+            source_files=source_files,
         )
         logger.info(
             "Download complete: %d language(s) saved.",

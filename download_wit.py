@@ -134,10 +134,12 @@ def download_all(
     languages: list[str],
     max_samples: int,
     seed: int = 42,
+    source_files: list[str] | None = None,
 ) -> dict[str, Path]:
     """
-    Scan all 10 GCS shards once, collecting rows for each requested language
-    with reservoir sampling. Returns a mapping of language code -> parquet path.
+    Scan GCS shards, collecting rows for each requested language with reservoir
+    sampling. Pass *source_files* to override the default 10-shard full dataset
+    (e.g. the 1% quick-start sample). Returns language code -> parquet path.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     progress = _load_progress(output_dir)
@@ -160,14 +162,16 @@ def download_all(
         lang: ReservoirSampler(max_samples, seed) for lang in pending
     }
 
-    completed_shards: list[int] = progress.get("completed_shards", [])
+    files_to_scan = source_files if source_files is not None else WIT_TRAIN_FILES
+    progress_key = f"completed_shards_{len(files_to_scan)}"
+    completed_shards: list[int] = progress.get(progress_key, [])
 
-    for shard_idx, url in enumerate(WIT_TRAIN_FILES):
+    for shard_idx, url in enumerate(files_to_scan):
         if shard_idx in completed_shards:
-            logger.info("Shard %d/%d already done — skipping", shard_idx, len(WIT_TRAIN_FILES))
+            logger.info("Shard %d/%d already done — skipping", shard_idx, len(files_to_scan))
             continue
 
-        logger.info("Scanning shard %d/%d: %s", shard_idx + 1, len(WIT_TRAIN_FILES), url)
+        logger.info("Scanning shard %d/%d: %s", shard_idx + 1, len(files_to_scan), url)
         try:
             pbar = tqdm(desc=f"Shard {shard_idx:02d}", unit="rows", leave=False)
             for row in _stream_tsv_gz(url):
@@ -188,11 +192,11 @@ def download_all(
             pbar.close()
         except Exception:
             logger.exception("Error on shard %d — will retry on next run", shard_idx)
-            _save_progress(output_dir, {"completed_shards": completed_shards})
+            _save_progress(output_dir, {**progress, progress_key: completed_shards})
             continue
 
         completed_shards.append(shard_idx)
-        _save_progress(output_dir, {"completed_shards": completed_shards})
+        _save_progress(output_dir, {**progress, progress_key: completed_shards})
         for lang, sampler in samplers.items():
             logger.info(
                 "  [%s] rows seen: %d  reservoir: %d",

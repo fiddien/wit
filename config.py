@@ -21,6 +21,7 @@ SEA_LANGUAGES = {
 
 # Full WIT training set: 10 TSV.gz shards on Google Cloud Storage (~2.5 GB each, ~25 GB total)
 WIT_GCS_BASE = "https://storage.googleapis.com/gresearch/wit"
+WIT_QUICKSTART_FILE = f"{WIT_GCS_BASE}/wit_v1.train.all-1percent_sample.tsv.gz"
 WIT_TRAIN_FILES = [
     f"{WIT_GCS_BASE}/wit_v1.train.all-{i:05d}-of-00010.tsv.gz"
     for i in range(10)
