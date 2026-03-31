@@ -215,6 +215,11 @@ def download_all(
             continue
 
         logger.info("Scanning shard %d/%d: %s", shard_idx + 1, len(files_to_scan), url)
+
+        if cache_dir is not None:
+            source: str | Path = _fetch_to_cache(url, cache_dir)
+        else:
+            source = url
         try:
             pbar = tqdm(desc=f"Shard {shard_idx:02d}", unit="rows", leave=False)
             for row in _stream_tsv_gz(source):
