@@ -11,12 +11,12 @@ SEA_LANGUAGES = {
     "th": "Thai",
     "tl": "Tagalog",
     "ms": "Malay",
-    "km": "Khmer",
+    # "km": "Khmer",
     "my": "Burmese",
     "lo": "Lao",
     "jv": "Javanese",
     "su": "Sundanese",
-    "ceb": "Cebuano",
+    # "ceb": "Cebuano",
 }
 
 # Full WIT training set: 10 TSV.gz shards on Google Cloud Storage (~2.5 GB each, ~25 GB total)
