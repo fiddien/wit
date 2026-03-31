@@ -56,13 +56,16 @@ logger = logging.getLogger(__name__)
 async def _fetch_image_bytes(
     session: aiohttp.ClientSession,
     url: str,
-) -> bytes | None:
-    """Download *url* and return JPEG bytes, or None on failure."""
+) -> tuple[bytes, None] | tuple[None, str]:
+    """Download *url* and return (JPEG bytes, None) on success, or (None, reason) on failure."""
+    last_reason = "unknown"
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)) as resp:
                 if resp.status != 200:
-                    return None
+                    last_reason = f"HTTP {resp.status}"
+                    logger.warning("HTTP %d on attempt %d for %s", resp.status, attempt, url)
+                    return None, last_reason
                 content_type = resp.headers.get("Content-Type", "")
                 raw = await resp.read()
             # Convert SVG to PNG
@@ -72,15 +75,17 @@ async def _fetch_image_bytes(
             img = Image.open(io.BytesIO(raw)).convert("RGB")
             buf = io.BytesIO()
             img.save(buf, format="JPEG", quality=90)
-            return buf.getvalue()
+            return buf.getvalue(), None
         except asyncio.TimeoutError:
+            last_reason = "timeout"
             logger.warning("Timeout on attempt %d for %s", attempt, url)
         except Exception as exc:
+            last_reason = f"{type(exc).__name__}: {exc}"
             logger.warning("Error on attempt %d for %s: %s", attempt, url, exc)
         if attempt < MAX_RETRIES:
             await asyncio.sleep(RETRY_BACKOFF * attempt)
     logger.debug("All retries exhausted for %s", url)
-    return None
+    return None, last_reason
 
 
 # ---------------------------------------------------------------------------
@@ -150,7 +155,7 @@ async def convert_language(
 
     semaphore = asyncio.Semaphore(workers)
 
-    async def _bounded_fetch(session, url):
+    async def _bounded_fetch(session, url) -> tuple:
         async with semaphore:
             await asyncio.sleep(0.05)  # to avoid rate-limiting
             return await _fetch_image_bytes(session, url)
@@ -168,11 +173,11 @@ async def convert_language(
 
         async def _process_row(row):
             nonlocal downloaded, failed
-            img_bytes = await _bounded_fetch(session, row["image_url"])
+            img_bytes, reason = await _bounded_fetch(session, row["image_url"])
             pbar.update(1)
             if img_bytes is None:
                 async with aiofiles.open(error_log, "a") as ef:
-                    await ef.write(row["image_url"] + "\n")
+                    await ef.write(f"{row['image_url']}\t{reason}\n")
                 failed += 1
                 return None
             downloaded += 1
