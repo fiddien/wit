@@ -17,6 +17,7 @@ env/
 
 # Data files
 data/
+cache/
 *.tar
 *.parquet
 *.arrow

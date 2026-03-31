@@ -25,6 +25,7 @@ import requests
 from tqdm import tqdm
 
 from config import (
+    DEFAULT_CACHE_DIR,
     DEFAULT_MAX_SAMPLES,
     DEFAULT_OUTPUT_DIR,
     REQUEST_TIMEOUT,
@@ -103,15 +104,53 @@ def _save_progress(output_dir: Path, progress: dict) -> None:
 # Core streaming scan
 # ---------------------------------------------------------------------------
 
-def _stream_tsv_gz(url: str):
-    """Yield dicts for each data row in a gzipped WIT TSV file."""
+def _fetch_to_cache(url: str, cache_dir: Path) -> Path:
+    """
+    Download *url* into *cache_dir* if not already present.
+    Uses a .part file while downloading so interrupted fetches are detected
+    and retried on the next run.
+    Returns the path to the completed local file.
+    """
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    filename = url.split("/")[-1]          # e.g. wit_v1.train.all-00000-of-00010.tsv.gz
+    dest = cache_dir / filename
+    part = cache_dir / (filename + ".part")
+
+    if dest.exists():
+        logger.info("Cache hit: %s", dest)
+        return dest
+
+    logger.info("Downloading %s → %s", url, dest)
     headers = {"User-Agent": "wit-sea-downloader/1.0"}
     with requests.get(url, stream=True, timeout=REQUEST_TIMEOUT, headers=headers) as resp:
         resp.raise_for_status()
-        gz_stream = gzip.GzipFile(fileobj=resp.raw)
+        total = int(resp.headers.get("content-length", 0)) or None
+        with part.open("wb") as f:
+            with tqdm(total=total, unit="B", unit_scale=True,
+                      desc=filename, leave=False) as pbar:
+                for chunk in resp.iter_content(chunk_size=1 << 20):  # 1 MB chunks
+                    f.write(chunk)
+                    pbar.update(len(chunk))
+
+    part.rename(dest)
+    logger.info("Cached → %s (%.1f MB)", dest, dest.stat().st_size / 1e6)
+    return dest
+
+
+def _stream_tsv_gz(source: str | Path):
+    """Yield row dicts from a gzipped WIT TSV (local path or URL)."""
+    if isinstance(source, Path) or not str(source).startswith("http"):
+        opener = lambda: gzip.open(source, "rb")  # noqa: E731
+    else:
+        headers = {"User-Agent": "wit-sea-downloader/1.0"}
+        resp = requests.get(str(source), stream=True,
+                            timeout=REQUEST_TIMEOUT, headers=headers)
+        resp.raise_for_status()
+        opener = lambda: gzip.GzipFile(fileobj=resp.raw)  # noqa: E731
+
+    with opener() as gz_stream:
         header_line = gz_stream.readline().decode("utf-8").rstrip("\n")
         col_names = header_line.split("\t")
-
         for raw_line in gz_stream:
             line = raw_line.decode("utf-8").rstrip("\n")
             if not line:
@@ -135,11 +174,15 @@ def download_all(
     max_samples: int,
     seed: int = 42,
     source_files: list[str] | None = None,
+    cache_dir: Path | None = None,
 ) -> dict[str, Path]:
     """
     Scan GCS shards, collecting rows for each requested language with reservoir
     sampling. Pass *source_files* to override the default 10-shard full dataset
     (e.g. the 1% quick-start sample). Returns language code -> parquet path.
+
+    If *cache_dir* is set, TSV.gz files are downloaded to disk first and
+    re-used on subsequent runs (resumable .part files handle interruptions).
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     progress = _load_progress(output_dir)
@@ -174,7 +217,7 @@ def download_all(
         logger.info("Scanning shard %d/%d: %s", shard_idx + 1, len(files_to_scan), url)
         try:
             pbar = tqdm(desc=f"Shard {shard_idx:02d}", unit="rows", leave=False)
-            for row in _stream_tsv_gz(url):
+            for row in _stream_tsv_gz(source):
                 pbar.update(1)
                 lang = row.get(_LANG_COL, "")
                 if lang not in lang_set:
@@ -257,31 +300,30 @@ def parse_args() -> argparse.Namespace:
         default=42,
         help="Random seed for reservoir sampling (default: %(default)s)",
     )
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=DEFAULT_CACHE_DIR,
+        help="Directory to cache downloaded TSV.gz files (default: %(default)s). "
+             "Pass an empty string to disable caching and stream directly.",
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
+    cache_dir = args.cache_dir if str(args.cache_dir) else None
     results = download_all(
         output_dir=args.output_dir,
         languages=args.languages,
         max_samples=args.max_samples,
         seed=args.seed,
+        cache_dir=cache_dir,
     )
     logger.info(
         "Done. Saved metadata for %d language(s): %s",
         len(results),
         ", ".join(results.keys()),
-    )
-
-
-if __name__ == "__main__":
-    args = parse_args()
-    results = download_all(
-        output_dir=args.output_dir,
-        languages=args.languages,
-        max_samples=args.max_samples,
-        seed=args.seed,
     )
     logger.info(
         "Done. Saved metadata for %d language(s): %s",

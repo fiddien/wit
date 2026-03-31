@@ -16,6 +16,7 @@ import sys
 from pathlib import Path
 
 from config import (
+    DEFAULT_CACHE_DIR,
     DEFAULT_MAX_SAMPLES,
     DEFAULT_OUTPUT_DIR,
     DEFAULT_SHARD_SIZE,
@@ -100,6 +101,13 @@ def parse_args() -> argparse.Namespace:
             "10-shard dataset. Useful for testing the pipeline end-to-end."
         ),
     )
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=DEFAULT_CACHE_DIR,
+        help="Directory to cache downloaded TSV.gz files (default: %(default)s). "
+             "Pass an empty string to stream directly without caching.",
+    )
     return parser.parse_args()
 
 
@@ -118,12 +126,14 @@ def main() -> None:
             source_files = [WIT_QUICKSTART_FILE]
         else:
             source_files = WIT_TRAIN_FILES
+        cache_dir = args.cache_dir if str(args.cache_dir) else None
         results = download_all(
             output_dir=args.output_dir,
             languages=args.languages,
             max_samples=args.max_samples,
             seed=args.seed,
             source_files=source_files,
+            cache_dir=cache_dir,
         )
         logger.info(
             "Download complete: %d language(s) saved.",
