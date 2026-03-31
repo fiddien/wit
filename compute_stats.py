@@ -17,7 +17,7 @@ from pathlib import Path
 import pandas as pd
 from tabulate import tabulate
 
-from config import DEFAULT_OUTPUT_DIR, SEA_LANGUAGES
+from config import DEFAULT_OUTPUT_DIR
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -100,11 +100,16 @@ def stats_from_shards(lang_dir: Path) -> dict | None:
     }
 
 
-def compute_language_stats(lang: str, data_dir: Path) -> dict:
+def compute_language_stats(
+    lang: str,
+    data_dir: Path,
+    language_names: dict[str, str] | None = None,
+) -> dict:
     lang_dir = data_dir / lang
+    names = language_names or {}
     stats: dict = {
         "language": lang,
-        "language_name": SEA_LANGUAGES.get(lang, lang),
+        "language_name": names.get(lang, lang),
     }
 
     parquet_stats = stats_from_parquet(lang_dir)
@@ -147,7 +152,7 @@ def display_stats(all_stats: list[dict]) -> None:
         "Failed\nDownloads", "Shards", "Avg Caption\nWords", "Avg Caption\nChars",
     ]
     print("\n" + "=" * 80)
-    print("  WIT Southeast Asian Languages — Dataset Statistics")
+    print("  Dataset Statistics")
     print("=" * 80)
     print(tabulate(table, headers=headers, tablefmt="rounded_outline", numalign="right"))
 
@@ -177,11 +182,15 @@ def display_stats(all_stats: list[dict]) -> None:
     print()
 
 
-def compute_all_stats(data_dir: Path, languages: list[str]) -> list[dict]:
+def compute_all_stats(
+    data_dir: Path,
+    languages: list[str],
+    language_names: dict[str, str] | None = None,
+) -> list[dict]:
     all_stats = []
     for lang in languages:
         logger.info("Computing stats for %s…", lang)
-        stats = compute_language_stats(lang, data_dir)
+        stats = compute_language_stats(lang, data_dir, language_names)
         all_stats.append(stats)
 
         # Save per-language stats
@@ -201,7 +210,7 @@ def compute_all_stats(data_dir: Path, languages: list[str]) -> list[dict]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Compute and display WIT Southeast Asian dataset statistics."
+        description="Compute and display dataset statistics."
     )
     parser.add_argument(
         "--data-dir",
@@ -212,14 +221,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--languages",
         nargs="+",
-        default=list(SEA_LANGUAGES.keys()),
-        choices=list(SEA_LANGUAGES.keys()),
+        default=None,
         metavar="LANG",
+        help="Language codes to compute stats for (default: all found in data-dir)",
     )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    all_stats = compute_all_stats(args.data_dir, args.languages)
+    languages = args.languages or [
+        p.parent.name for p in args.data_dir.glob("*/metadata.parquet")
+    ]
+    all_stats = compute_all_stats(args.data_dir, languages)
     display_stats(all_stats)

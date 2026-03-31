@@ -38,7 +38,6 @@ from config import (
     REQUEST_DELAY,
     REQUEST_TIMEOUT,
     RETRY_BACKOFF,
-    SEA_LANGUAGES,
     TEXT_EXT,
 )
 
@@ -139,6 +138,7 @@ async def convert_language(
     output_dir: Path,
     shard_size: int,
     workers: int,
+    language_names: dict[str, str] | None = None,
 ) -> dict:
     """
     Convert the metadata parquet for *lang* to WebDataset shards.
@@ -152,6 +152,7 @@ async def convert_language(
     lang_out = output_dir / lang
     lang_out.mkdir(parents=True, exist_ok=True)
     error_log = lang_out / "errors.log"
+    names = language_names or {}
 
     df = pd.read_parquet(parquet_path)
     total = len(df)
@@ -227,7 +228,7 @@ async def convert_language(
 
     summary = {
         "language": lang,
-        "language_name": SEA_LANGUAGES.get(lang, lang),
+        "language_name": names.get(lang, lang),
         "total_rows": total,
         "downloaded": downloaded,
         "failed": failed,
@@ -250,10 +251,13 @@ async def convert_all(
     languages: list[str],
     shard_size: int,
     workers: int,
+    language_names: dict[str, str] | None = None,
 ) -> list[dict]:
     summaries = []
     for lang in languages:
-        summary = await convert_language(lang, input_dir, output_dir, shard_size, workers)
+        summary = await convert_language(
+            lang, input_dir, output_dir, shard_size, workers, language_names
+        )
         summaries.append(summary)
     return summaries
 
@@ -277,9 +281,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--languages",
         nargs="+",
-        default=list(SEA_LANGUAGES.keys()),
-        choices=list(SEA_LANGUAGES.keys()),
+        default=None,
         metavar="LANG",
+        help="Language codes to convert (default: all found in input-dir)",
     )
     parser.add_argument(
         "--shard-size",
@@ -298,11 +302,15 @@ def parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     args = parse_args()
+    # When run standalone, discover languages from existing parquet files
+    languages = args.languages or [
+        p.parent.name for p in args.input_dir.glob("*/metadata.parquet")
+    ]
     summaries = asyncio.run(
         convert_all(
             input_dir=args.input_dir,
             output_dir=args.output_dir,
-            languages=args.languages,
+            languages=languages,
             shard_size=args.shard_size,
             workers=args.workers,
         )

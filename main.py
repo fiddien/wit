@@ -1,12 +1,15 @@
 """
-Main orchestration script for the WIT Southeast Asian dataset pipeline.
+Main orchestration script for the SEACrowd image-text dataset pipeline.
 
 Steps:
-  1. download  — fetch WIT from Hugging Face and save per-language parquet files
+  1. download  — fetch dataset from its source and save per-language parquet files
   2. convert   — download images and write WebDataset tar shards
   3. stats     — compute and display dataset statistics
 
 Each step is idempotent; re-running skips already-completed work.
+
+Supported datasets (--dataset):
+  wit             Wikipedia-based Image Text (WIT) — SEA languages via GCS
 """
 
 import argparse
@@ -21,13 +24,19 @@ from config import (
     DEFAULT_OUTPUT_DIR,
     DEFAULT_SHARD_SIZE,
     DEFAULT_WORKERS,
-    SEA_LANGUAGES,
-    WIT_QUICKSTART_FILE,
-    WIT_TRAIN_FILES,
 )
 from compute_stats import compute_all_stats, display_stats
 from convert_to_webdataset import convert_all
-from download_wit import download_all
+
+# Registry of supported datasets.  Each entry must expose:
+#   LANGUAGES          dict[str, str]  language code -> human name
+#   download_all       callable        see datasets/wit/download.py for signature
+# WIT-specific extras (WIT_QUICKSTART_FILE, WIT_TRAIN_FILES) are imported lazily.
+import datasets.wit as _wit
+
+DATASET_REGISTRY = {
+    "wit": _wit,
+}
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -42,10 +51,16 @@ STEPS = ("download", "convert", "stats")
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "End-to-end pipeline: download WIT for Southeast Asian languages, "
+            "End-to-end pipeline: download a dataset for Southeast Asian languages, "
             "convert to OpenCLIP WebDataset format, and display statistics."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--dataset",
+        default="wit",
+        choices=list(DATASET_REGISTRY.keys()),
+        help="Dataset to process",
     )
     parser.add_argument(
         "--steps",
@@ -64,10 +79,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--languages",
         nargs="+",
-        default=list(SEA_LANGUAGES.keys()),
-        choices=list(SEA_LANGUAGES.keys()),
+        default=None,
         metavar="LANG",
-        help="Language codes to include",
+        help="Language codes to include (default: all languages for the chosen dataset)",
     )
     parser.add_argument(
         "--max-samples",
@@ -114,27 +128,37 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
+    dataset = DATASET_REGISTRY[args.dataset]
+    language_names: dict[str, str] = dataset.LANGUAGES
+    languages: list[str] = args.languages or list(language_names.keys())
+
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    logger.info("Dataset: %s", args.dataset)
     logger.info("Output directory: %s", args.output_dir.resolve())
-    logger.info("Languages: %s", ", ".join(args.languages))
+    logger.info("Languages: %s", ", ".join(languages))
     logger.info("Steps: %s", " -> ".join(args.steps))
 
     if "download" in args.steps:
-        logger.info("=== Step 1/3: Download WIT metadata ===")
-        if args.quick_start:
-            logger.info("Quick-start mode: using 1%% sample file (%s)", WIT_QUICKSTART_FILE)
-            source_files = [WIT_QUICKSTART_FILE]
-        else:
-            source_files = WIT_TRAIN_FILES
-        cache_dir = args.cache_dir if str(args.cache_dir) else None
-        results = download_all(
+        logger.info("=== Step 1/3: Download %s metadata ===", args.dataset.upper())
+
+        # WIT supports an optional quick-start sample and caching; pass kwargs
+        # that the download_all function accepts.
+        download_kwargs: dict = dict(
             output_dir=args.output_dir,
-            languages=args.languages,
+            languages=languages,
             max_samples=args.max_samples,
             seed=args.seed,
-            source_files=source_files,
-            cache_dir=cache_dir,
         )
+        if args.dataset == "wit":
+            if args.quick_start:
+                logger.info("Quick-start mode: using 1%% sample file")
+                download_kwargs["source_files"] = [dataset.WIT_QUICKSTART_FILE]
+            else:
+                download_kwargs["source_files"] = dataset.WIT_TRAIN_FILES
+            cache_dir = args.cache_dir if str(args.cache_dir) else None
+            download_kwargs["cache_dir"] = cache_dir
+
+        results = dataset.download_all(**download_kwargs)
         logger.info(
             "Download complete: %d language(s) saved.",
             len(results),
@@ -146,9 +170,10 @@ def main() -> None:
             convert_all(
                 input_dir=args.output_dir,
                 output_dir=args.output_dir,
-                languages=args.languages,
+                languages=languages,
                 shard_size=args.shard_size,
                 workers=args.workers,
+                language_names=language_names,
             )
         )
         logger.info("Conversion complete.")
@@ -164,7 +189,7 @@ def main() -> None:
 
     if "stats" in args.steps:
         logger.info("=== Step 3/3: Compute statistics ===")
-        all_stats = compute_all_stats(args.output_dir, args.languages)
+        all_stats = compute_all_stats(args.output_dir, languages, language_names)
         display_stats(all_stats)
 
 
