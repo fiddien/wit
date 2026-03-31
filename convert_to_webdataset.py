@@ -35,6 +35,7 @@ from config import (
     IMAGE_EXT,
     MAX_RETRIES,
     META_EXT,
+    REQUEST_DELAY,
     REQUEST_TIMEOUT,
     RETRY_BACKOFF,
     SEA_LANGUAGES,
@@ -62,6 +63,12 @@ async def _fetch_image_bytes(
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)) as resp:
+                if resp.status == 429:
+                    retry_after = float(resp.headers.get("Retry-After", RETRY_BACKOFF * attempt * 2))
+                    last_reason = "HTTP 429 (rate limited)"
+                    logger.warning("Rate limited (429) on attempt %d for %s — waiting %.1fs", attempt, url, retry_after)
+                    await asyncio.sleep(retry_after)
+                    continue
                 if resp.status != 200:
                     last_reason = f"HTTP {resp.status}"
                     logger.warning("HTTP %d on attempt %d for %s", resp.status, attempt, url)
@@ -157,7 +164,7 @@ async def convert_language(
 
     async def _bounded_fetch(session, url) -> tuple:
         async with semaphore:
-            await asyncio.sleep(0.05)  # to avoid rate-limiting
+            await asyncio.sleep(REQUEST_DELAY)
             return await _fetch_image_bytes(session, url)
 
     downloaded = 0

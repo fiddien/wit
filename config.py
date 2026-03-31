@@ -51,13 +51,14 @@ WIT_TSV_COLUMNS = [
 # Pipeline defaults
 DEFAULT_MAX_SAMPLES = 100_000      # per language
 DEFAULT_SHARD_SIZE = 10_000
-DEFAULT_WORKERS = 10
+DEFAULT_WORKERS = 4
 DEFAULT_OUTPUT_DIR = Path("data")
 DEFAULT_CHECKPOINT_DIR = Path("checkpoints")
 DEFAULT_CACHE_DIR = Path("cache")  # local cache for downloaded TSV.gz files
 
 # HTTP settings for image downloads
-REQUEST_TIMEOUT = 30               # seconds
+REQUEST_TIMEOUT = 300              # seconds
+REQUEST_DELAY = 0.2                # seconds between requests per worker (throttle)
 MAX_RETRIES = 3
 RETRY_BACKOFF = 2.0                # seconds between retries
 
