@@ -23,6 +23,7 @@ from pathlib import Path
 
 import aiofiles
 import aiohttp
+import cairosvg
 import pandas as pd
 from PIL import Image
 from tqdm.asyncio import tqdm as atqdm
@@ -62,8 +63,12 @@ async def _fetch_image_bytes(
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)) as resp:
                 if resp.status != 200:
                     return None
+                content_type = resp.headers.get("Content-Type", "")
                 raw = await resp.read()
-            # Validate and normalise to JPEG via Pillow
+            # Convert SVG to PNG
+            if "svg" in content_type or url.lower().endswith(".svg"):
+                raw = cairosvg.svg2png(bytestring=raw)
+            # Validate and normalise to JPEG
             img = Image.open(io.BytesIO(raw)).convert("RGB")
             buf = io.BytesIO()
             img.save(buf, format="JPEG", quality=90)
@@ -155,7 +160,8 @@ async def convert_language(
     total_shards = 0
 
     connector = aiohttp.TCPConnector(limit=workers * 2)
-    async with aiohttp.ClientSession(connector=connector) as session:
+    headers = {"User-Agent": "wit-sea-downloader/1.0 (https://github.com/fiddien/wit)"}
+    async with aiohttp.ClientSession(connector=connector, headers=headers) as session:
         pbar = atqdm(total=total, desc=f"[{lang}] downloading", unit="img")
 
         async def _process_row(row):
