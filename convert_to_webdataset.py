@@ -2,7 +2,10 @@
 Convert WIT metadata parquet files to OpenCLIP-compatible WebDataset tar shards.
 
 For each language the output layout is:
-  <output_dir>/<lang>/shard-{n:06d}.tar
+  <output_dir>/<split>/<lang>/shard-{n:06d}.tar
+
+Callers pass the split subdirectory as *output_dir* (e.g. ``data/wit/train``),
+so this script always writes to ``<output_dir>/<lang>/shard-{n:06d}.tar``.
 
 Each shard contains up to SHARD_SIZE samples; each sample consists of:
   {idx:08d}.jpg   — downloaded image (JPEG)
@@ -52,8 +55,19 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Image download helpers
+# Image helpers
 # ---------------------------------------------------------------------------
+
+def _load_local_image_bytes(path: str) -> tuple[bytes, None] | tuple[None, str]:
+    """Read a local image file and return normalised JPEG bytes."""
+    try:
+        img = Image.open(path).convert("RGB")
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=90)
+        return buf.getvalue(), None
+    except Exception as exc:
+        return None, f"{type(exc).__name__}: {exc}"
+
 
 async def _fetch_image_bytes(
     session: aiohttp.ClientSession,
@@ -203,18 +217,23 @@ async def convert_language(
 
         async def _process_row(row):
             nonlocal downloaded, failed
-            img_bytes, reason = await _bounded_fetch(session, row["image_url"])
+            # CulturalGround: image already on disk — no network needed
+            local_path = row.get("image_path")
+            if local_path:
+                img_bytes, reason = _load_local_image_bytes(local_path)
+            else:
+                img_bytes, reason = await _bounded_fetch(session, row["image_url"])
             pbar.update(1)
             if img_bytes is None:
                 async with aiofiles.open(error_log, "a") as ef:
-                    await ef.write(f"{row['image_url']}\t{reason}\n")
+                    await ef.write(f"{local_path or row.get('image_url', '')}\t{reason}\n")
                 failed += 1
                 return None
             downloaded += 1
             return {
                 "image_bytes": img_bytes,
                 "caption": row["caption"],
-                "image_url": row["image_url"],
+                "image_url": row.get("image_url") or row.get("page_url", local_path or ""),
                 "page_title": row.get("page_title", ""),
                 "page_url": row.get("page_url", ""),
                 "language": lang,

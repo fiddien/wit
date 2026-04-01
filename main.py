@@ -29,6 +29,7 @@ from config import (
 )
 from compute_stats import compute_all_stats, display_stats
 from convert_to_webdataset import convert_all
+from prepare_training import prepare as prepare_training
 
 # Registry of supported datasets.  Each entry must expose:
 #   LANGUAGES     dict[str, str]  language code -> human name
@@ -48,7 +49,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-STEPS = ("download", "convert", "stats")
+STEPS = ("download", "convert", "stats", "prepare")
 
 
 def parse_args() -> argparse.Namespace:
@@ -111,6 +112,18 @@ def parse_args() -> argparse.Namespace:
         help="Random seed for sampling",
     )
     parser.add_argument(
+        "--val-fraction",
+        type=float,
+        default=0.1,
+        help="Fraction of shards per (source, language) group to reserve for validation (prepare step)",
+    )
+    parser.add_argument(
+        "--weight-temp",
+        type=float,
+        default=0.7,
+        help="Temperature for language sampling weights in the prepare step (1.0 = proportional, <1 = upsample low-resource)",
+    )
+    parser.add_argument(
         "--quick-start",
         action="store_true",
         help=(
@@ -159,7 +172,7 @@ def main() -> None:
         # WIT supports an optional quick-start sample and caching; pass kwargs
         # that the download_all function accepts.
         download_kwargs: dict = dict(
-            output_dir=args.output_dir,
+            output_dir=args.output_dir / "train",
             languages=languages,
             max_samples=args.max_samples,
             seed=args.seed,
@@ -181,12 +194,29 @@ def main() -> None:
             len(results),
         )
 
+        # For WIT (full run only), also download official val and test splits.
+        if args.dataset == "wit" and not args.quick_start:
+            for split_name, split_files in [
+                ("val", dataset.WIT_VALIDATION_FILES),
+                ("test", dataset.WIT_TEST_FILES),
+            ]:
+                split_out = args.output_dir / split_name
+                logger.info("=== Downloading WIT official %s split ===", split_name)
+                dataset.download_all(
+                    output_dir=split_out,
+                    languages=languages,
+                    max_samples=args.max_samples,
+                    seed=args.seed,
+                    source_files=split_files,
+                    cache_dir=cache_dir,
+                )
+
     if "convert" in args.steps:
         logger.info("=== Step 2/3: Convert to WebDataset ===")
         asyncio.run(
             convert_all(
-                input_dir=args.output_dir,
-                output_dir=args.output_dir,
+                input_dir=args.output_dir / "train",
+                output_dir=args.output_dir / "train",
                 languages=languages,
                 shard_size=args.shard_size,
                 workers=args.workers,
@@ -194,12 +224,46 @@ def main() -> None:
                 image_cache_dir=args.image_cache_dir or None,
             )
         )
+
+        # For WIT (full run only), also convert official val and test shards.
+        if args.dataset == "wit" and not args.quick_start:
+            for split_name in ("val", "test"):
+                split_dir = args.output_dir / split_name
+                if not split_dir.exists():
+                    continue
+                logger.info("=== Converting WIT official %s shards ===", split_name)
+                asyncio.run(
+                    convert_all(
+                        input_dir=split_dir,
+                        output_dir=split_dir,
+                        languages=languages,
+                        shard_size=args.shard_size,
+                        workers=args.workers,
+                        language_names=language_names,
+                        image_cache_dir=args.image_cache_dir or None,
+                    )
+                )
         logger.info("Conversion complete.")
 
     if "stats" in args.steps:
         logger.info("=== Step 3/3: Compute statistics ===")
-        all_stats = compute_all_stats(args.output_dir, languages, language_names)
+        all_stats = compute_all_stats(args.output_dir / "train", languages, language_names)
         display_stats(all_stats)
+
+    if "prepare" in args.steps:
+        logger.info("=== Step 4/4: Prepare training manifest ===")
+        # When running the full pipeline for a single dataset, the data-dir scanned
+        # for shards should be the multi-dataset root (DEFAULT_OUTPUT_DIR), not the
+        # dataset-specific subfolder, so that shards from different sources are
+        # combined in one manifest.
+        from config import DEFAULT_OUTPUT_DIR as _ROOT
+        prepare_training(
+            data_dir=_ROOT,
+            val_fraction=args.val_fraction,
+            weight_temperature=args.weight_temp,
+            shard_size=args.shard_size,
+        )
+        logger.info("Prepare complete.")
 
 
 if __name__ == "__main__":

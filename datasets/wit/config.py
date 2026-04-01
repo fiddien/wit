@@ -24,6 +24,14 @@ WIT_TRAIN_FILES = [
     f"{WIT_GCS_BASE}/wit_v1.train.all-{i:05d}-of-00010.tsv.gz"
     for i in range(10)
 ]
+WIT_VALIDATION_FILES = [
+    f"{WIT_GCS_BASE}/wit_v1.val.all-{i:05d}-of-00005.tsv.gz"
+    for i in range(5)
+]
+WIT_TEST_FILES = [
+    f"{WIT_GCS_BASE}/wit_v1.test.all-{i:05d}-of-00005.tsv.gz"
+    for i in range(5)
+]
 
 # TSV column order
 WIT_TSV_COLUMNS = [
