@@ -13,7 +13,8 @@ DEFAULT_SHARD_SIZE = 10_000
 DEFAULT_WORKERS = 4
 DEFAULT_OUTPUT_DIR = Path("data")
 DEFAULT_CHECKPOINT_DIR = Path("checkpoints")
-DEFAULT_CACHE_DIR = Path("cache")  # local cache for downloaded TSV.gz files
+DEFAULT_CACHE_DIR = Path("cache")        # local cache for downloaded TSV.gz files
+DEFAULT_IMAGE_CACHE_DIR = Path("cache") / "images"  # local cache for downloaded images
 
 # HTTP settings for image downloads
 REQUEST_TIMEOUT = 300              # seconds

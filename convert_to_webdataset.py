@@ -15,6 +15,7 @@ Existing shards are detected by a sentinel file and skipped on re-run.
 
 import argparse
 import asyncio
+import hashlib
 import io
 import json
 import logging
@@ -29,6 +30,7 @@ from PIL import Image
 from tqdm.asyncio import tqdm as atqdm
 
 from config import (
+    DEFAULT_IMAGE_CACHE_DIR,
     DEFAULT_OUTPUT_DIR,
     DEFAULT_SHARD_SIZE,
     DEFAULT_WORKERS,
@@ -56,8 +58,23 @@ logger = logging.getLogger(__name__)
 async def _fetch_image_bytes(
     session: aiohttp.ClientSession,
     url: str,
+    cache_dir: Path | None = None,
 ) -> tuple[bytes, None] | tuple[None, str]:
-    """Download *url* and return (JPEG bytes, None) on success, or (None, reason) on failure."""
+    """Download *url* and return (JPEG bytes, None) on success, or (None, reason) on failure.
+
+    If *cache_dir* is given, a successful download is written to disk (keyed by
+    the SHA-256 hash of the URL) and returned from disk on subsequent calls,
+    skipping the network entirely and avoiding rate-limit hits.
+    """
+    cache_path: Path | None = None
+    if cache_dir is not None:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        url_hash = hashlib.sha256(url.encode()).hexdigest()
+        cache_path = cache_dir / f"{url_hash}.jpg"
+        if cache_path.exists():
+            async with aiofiles.open(cache_path, "rb") as f:
+                return await f.read(), None
+
     last_reason = "unknown"
     for attempt in range(1, MAX_RETRIES + 1):
         try:
@@ -81,7 +98,11 @@ async def _fetch_image_bytes(
             img = Image.open(io.BytesIO(raw)).convert("RGB")
             buf = io.BytesIO()
             img.save(buf, format="JPEG", quality=90)
-            return buf.getvalue(), None
+            jpeg_bytes = buf.getvalue()
+            if cache_path is not None:
+                async with aiofiles.open(cache_path, "wb") as f:
+                    await f.write(jpeg_bytes)
+            return jpeg_bytes, None
         except asyncio.TimeoutError:
             last_reason = "timeout"
             logger.warning("Timeout on attempt %d for %s", attempt, url)
@@ -139,6 +160,7 @@ async def convert_language(
     shard_size: int,
     workers: int,
     language_names: dict[str, str] | None = None,
+    image_cache_dir: Path | None = None,
 ) -> dict:
     """
     Convert the metadata parquet for *lang* to WebDataset shards.
@@ -166,7 +188,7 @@ async def convert_language(
     async def _bounded_fetch(session, url) -> tuple:
         async with semaphore:
             await asyncio.sleep(REQUEST_DELAY)
-            return await _fetch_image_bytes(session, url)
+            return await _fetch_image_bytes(session, url, image_cache_dir)
 
     downloaded = 0
     failed = 0
@@ -252,11 +274,13 @@ async def convert_all(
     shard_size: int,
     workers: int,
     language_names: dict[str, str] | None = None,
+    image_cache_dir: Path | None = None,
 ) -> list[dict]:
     summaries = []
     for lang in languages:
         summary = await convert_language(
-            lang, input_dir, output_dir, shard_size, workers, language_names
+            lang, input_dir, output_dir, shard_size, workers, language_names,
+            image_cache_dir=image_cache_dir,
         )
         summaries.append(summary)
     return summaries
@@ -297,6 +321,13 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_WORKERS,
         help="Parallel image download workers (default: %(default)s)",
     )
+    parser.add_argument(
+        "--image-cache-dir",
+        type=Path,
+        default=DEFAULT_IMAGE_CACHE_DIR,
+        help="Directory to cache downloaded images to avoid re-fetching on re-runs "
+             "(default: %(default)s). Pass an empty string to disable caching.",
+    )
     return parser.parse_args()
 
 
@@ -313,6 +344,7 @@ if __name__ == "__main__":
             languages=languages,
             shard_size=args.shard_size,
             workers=args.workers,
+            image_cache_dir=args.image_cache_dir or None,
         )
     )
     for s in summaries:

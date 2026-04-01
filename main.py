@@ -21,6 +21,7 @@ from pathlib import Path
 
 from config import (
     DEFAULT_CACHE_DIR,
+    DEFAULT_IMAGE_CACHE_DIR,
     DEFAULT_MAX_SAMPLES,
     DEFAULT_OUTPUT_DIR,
     DEFAULT_SHARD_SIZE,
@@ -124,6 +125,13 @@ def parse_args() -> argparse.Namespace:
         help="Directory to cache downloaded TSV.gz files (default: %(default)s). "
              "Pass an empty string to stream directly without caching.",
     )
+    parser.add_argument(
+        "--image-cache-dir",
+        type=Path,
+        default=DEFAULT_IMAGE_CACHE_DIR,
+        help="Directory to cache downloaded images to avoid re-fetching on re-runs "
+             "(default: %(default)s). Pass an empty string to disable image caching.",
+    )
     return parser.parse_args()
 
 
@@ -178,6 +186,7 @@ def main() -> None:
                 shard_size=args.shard_size,
                 workers=args.workers,
                 language_names=language_names,
+                image_cache_dir=args.image_cache_dir or None,
             )
         )
         logger.info("Conversion complete.")
