@@ -142,6 +142,11 @@ def main() -> None:
     language_names: dict[str, str] = dataset.LANGUAGES
     languages: list[str] = args.languages or list(language_names.keys())
 
+    # Namespace output by dataset when the user hasn't overridden the default,
+    # so that `--dataset wit` and `--dataset cultural-ground` don't collide.
+    if args.output_dir == DEFAULT_OUTPUT_DIR:
+        args.output_dir = DEFAULT_OUTPUT_DIR / args.dataset
+
     args.output_dir.mkdir(parents=True, exist_ok=True)
     logger.info("Dataset: %s", args.dataset)
     logger.info("Output directory: %s", args.output_dir.resolve())
