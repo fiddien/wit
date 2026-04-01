@@ -185,7 +185,7 @@ def main() -> None:
             logger.info(
                 "  [%s] %s — downloaded=%d  failed=%d  shards=%d",
                 s["language"],
-                s["language_name"],
+                s.get("language_name") or "",
                 s.get("downloaded", 0),
                 s.get("failed", 0),
                 s.get("shards", 0),
