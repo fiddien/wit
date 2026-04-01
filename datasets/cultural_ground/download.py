@@ -93,16 +93,17 @@ def _extract_qid(image_path: str) -> str | None:
 
 
 def _parse_conversation(record: dict) -> tuple[str, str]:
-    """Return (question, answer) from a LLaVA-format conversations list."""
-    question = ""
-    answer = ""
-    for turn in record.get("conversations", []):
-        role = turn.get("from", "")
-        value = turn.get("value", "")
-        if role == "human":
-            question = value.replace("<image>\n", "").replace("<image>", "").strip()
-        elif role == "gpt":
-            answer = value.strip()
+    """Return (question, answer) from a CulturalGround-Refined record."""
+    question = (
+        record.get("reformulated_question")
+        or record.get("original_question")
+        or ""
+    ).strip()
+    answer = (
+        record.get("reformulated_answer")
+        or record.get("original_answer")
+        or ""
+    ).strip()
     return question, answer
 
 
@@ -318,7 +319,7 @@ def download_all(
                 continue
             if not record.get("image"):
                 continue
-            qid = _extract_qid(record.get("image", ""))
+            qid = record.get("id") or _extract_qid(record.get("image", ""))
             if not qid:
                 continue
             question, answer = _parse_conversation(record)
