@@ -170,7 +170,7 @@ def main() -> None:
 
     if "convert" in args.steps:
         logger.info("=== Step 2/3: Convert to WebDataset ===")
-        summaries = asyncio.run(
+        asyncio.run(
             convert_all(
                 input_dir=args.output_dir,
                 output_dir=args.output_dir,
@@ -181,15 +181,6 @@ def main() -> None:
             )
         )
         logger.info("Conversion complete.")
-        for s in summaries:
-            logger.info(
-                "  [%s] %s — downloaded=%d  failed=%d  shards=%d",
-                s["language"],
-                s.get("language_name") or "",
-                s.get("downloaded", 0),
-                s.get("failed", 0),
-                s.get("shards", 0),
-            )
 
     if "stats" in args.steps:
         logger.info("=== Step 3/3: Compute statistics ===")
