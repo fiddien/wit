@@ -4,27 +4,28 @@ Download and filter the CulturalGround dataset for Southeast Asian languages.
 Strategy
 --------
 1. For each SEA country, stream the LLM-refined open-ended VQA JSONL file
-   from HuggingFace (`CulturalGround-Recipes/CulturalGround-Refined-OE/`).
-2. Filter records whose `language` field is a SEA language code.
-3. Apply reservoir sampling to keep at most *max_samples* per language.
-4. Batch-resolve Wikidata QIDs (embedded in each image filename as `Q\d+`)
-   to Wikimedia Commons image URLs via the Wikidata API (P18 property).
-   Results are cached to disk so re-runs skip the API calls.
-5. Save one metadata.parquet per language.
+   from HuggingFace and reservoir-sample records per language.
+2. Download the pre-packaged per-country image tarball from HuggingFace
+   (CultureGroundImages/{country}.tar.gz) and selectively extract only the
+   images needed by the sampled records — no Wikidata API calls required.
+3. Match sampled records to extracted images by Wikidata QID.
+4. Save one metadata.parquet per language.
 
 Checkpointing
 -------------
 - A language whose metadata.parquet already exists is skipped.
-- The Wikidata URL cache persists across runs at <cache_dir>/.cg_url_cache.json.
+- Downloaded JSONL files are cached under <cache_dir>/.
+- Downloaded tarballs are cached as <cache_dir>/{country}.tar.gz.
+- Extracted images live under <cache_dir>/images/{country}/ and are reused
+  on re-runs (only missing QIDs trigger a new tarball scan).
 """
 
 import json
 import logging
 import random
 import re
-import time
+import tarfile
 from pathlib import Path
-from urllib.parse import quote
 
 import pandas as pd
 import requests
@@ -32,13 +33,10 @@ from tqdm import tqdm
 
 from config import DEFAULT_MAX_SAMPLES, DEFAULT_OUTPUT_DIR, DEFAULT_CACHE_DIR, REQUEST_TIMEOUT
 from datasets.cultural_ground.config import (
+    IMAGE_TARBALL_TEMPLATE,
     LANGUAGES,
     OE_REFINED_JSONL_TEMPLATE,
     SEA_COUNTRIES,
-    WIKIDATA_API_URL,
-    WIKIDATA_BATCH_SIZE,
-    WIKIDATA_REQUEST_DELAY,
-    WIKIMEDIA_FILEPATH_URL,
 )
 
 logging.basicConfig(
@@ -47,8 +45,6 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
-
-_URL_CACHE_FILE = ".cg_url_cache.json"
 
 
 # ---------------------------------------------------------------------------
@@ -180,81 +176,129 @@ def _stream_country_jsonl(
 
 
 # ---------------------------------------------------------------------------
-# Wikidata image URL resolution
+# Tarball download + selective extraction
 # ---------------------------------------------------------------------------
 
-def _load_url_cache(cache_path: Path) -> dict[str, str]:
-    if cache_path.exists():
-        try:
-            return json.loads(cache_path.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    return {}
-
-
-def _save_url_cache(cache_path: Path, cache: dict[str, str]) -> None:
-    cache_path.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def _resolve_qids_to_urls(
-    qids: list[str],
-    cache_path: Path,
+def _download_country_tarball(
+    country: str,
     session: requests.Session,
-) -> dict[str, str]:
-    """Batch-resolve Wikidata QIDs to Wikimedia Commons Special:FilePath URLs.
+    cache_dir: Path,
+) -> Path | None:
+    """Download {country}.tar.gz to *cache_dir*. Returns local path or None on error.
 
-    Caches results to *cache_path* (JSON).  Only missing QIDs hit the API.
-    Returns {qid: image_url} for resolved entities (P18 claim present).
+    Uses atomic rename via a .part file so an interrupted download does not
+    leave a corrupt archive on disk.
     """
-    cache = _load_url_cache(cache_path)
-    missing = [q for q in qids if q not in cache]
-    if not missing:
-        logger.info("All %d QIDs resolved from cache.", len(qids))
-        return {q: cache[q] for q in qids if q in cache}
+    url = IMAGE_TARBALL_TEMPLATE.format(country=country)
+    dest = cache_dir / f"{country}.tar.gz"
+    if dest.exists():
+        logger.info("Tarball already cached: %s", dest)
+        return dest
 
-    logger.info("Resolving %d/%d QIDs via Wikidata API…", len(missing), len(qids))
-    headers = {"User-Agent": "seacrowd-cg-downloader/1.0 (SEACrowd; Wikidata API)"}
-
-    n_batches = (len(missing) + WIKIDATA_BATCH_SIZE - 1) // WIKIDATA_BATCH_SIZE
-    for i in tqdm(range(0, len(missing), WIKIDATA_BATCH_SIZE),
-                  total=n_batches, desc="Wikidata API", unit="batch"):
-        batch = missing[i : i + WIKIDATA_BATCH_SIZE]
-        params = {
-            "action": "wbgetentities",
-            "ids": "|".join(batch),
-            "props": "claims",
-            "format": "json",
-        }
-        try:
-            resp = session.get(
-                WIKIDATA_API_URL, params=params, headers=headers, timeout=30
-            )
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    part = dest.with_suffix(".gz.part")
+    part.unlink(missing_ok=True)
+    headers = {"User-Agent": "seacrowd-cg-downloader/1.0 (SEACrowd dataset pipeline)"}
+    try:
+        with session.get(url, stream=True, timeout=REQUEST_TIMEOUT, headers=headers) as resp:
+            if resp.status_code == 404:
+                logger.warning("Tarball not found for '%s' (HTTP 404)", country)
+                return None
             resp.raise_for_status()
-            data = resp.json()
-            for qid, entity in data.get("entities", {}).items():
-                p18_claims = entity.get("claims", {}).get("P18", [])
-                if p18_claims:
-                    try:
-                        filename = p18_claims[0]["mainsnak"]["datavalue"]["value"]
-                        # Wikimedia uses underscores in filenames, not spaces
-                        filename = filename.replace(" ", "_")
-                        # URL-encode special characters, preserving normal filename chars
-                        encoded = quote(filename, safe="!()*/:@_.-~")
-                        cache[qid] = WIKIMEDIA_FILEPATH_URL.format(filename=encoded)
-                    except (KeyError, IndexError, TypeError):
-                        pass
-        except Exception as exc:
-            logger.warning("Wikidata API error (batch %d): %s", i // WIKIDATA_BATCH_SIZE, exc)
+            total = int(resp.headers.get("content-length", 0)) or None
+            with part.open("wb") as f:
+                with tqdm(total=total, unit="B", unit_scale=True,
+                          desc=f"cg/{country}.tar.gz", leave=False) as pbar:
+                    for chunk in resp.iter_content(chunk_size=1 << 20):
+                        f.write(chunk)
+                        pbar.update(len(chunk))
+        part.rename(dest)
+        logger.info("Downloaded → %s", dest)
+        return dest
+    except Exception as exc:
+        part.unlink(missing_ok=True)
+        logger.error("Failed to download tarball for '%s': %s", country, exc)
+        return None
 
-        time.sleep(WIKIDATA_REQUEST_DELAY)
 
-    _save_url_cache(cache_path, cache)
-    resolved = {q: cache[q] for q in qids if q in cache}
+def _extract_needed_images(
+    tarball_path: Path,
+    needed_qids: set[str],
+    needed_filenames: set[str],
+    extract_dir: Path,
+) -> dict[str, Path]:
+    """Selectively extract images for *needed_qids* from *tarball_path*.
+
+    Images are extracted flat into *extract_dir* (directory components stripped).
+    Matching is done by QID (``Q\\d+`` in stem) and, as a fallback, by exact
+    filename.  Already-extracted files are reused without re-scanning the
+    archive.
+
+    Returns ``{qid: local_path}`` for every successfully located image.
+    """
+    extract_dir.mkdir(parents=True, exist_ok=True)
+    qid_to_path: dict[str, Path] = {}
+    filename_to_qid: dict[str, str] = {f: _extract_qid(f) for f in needed_filenames
+                                        if _extract_qid(f)}
+
+    # Discover already-extracted images
+    for existing in extract_dir.iterdir():
+        if not existing.is_file():
+            continue
+        qid = _extract_qid(existing.name)
+        if qid and qid in needed_qids:
+            qid_to_path[qid] = existing
+        elif existing.name in filename_to_qid:
+            qid_to_path[filename_to_qid[existing.name]] = existing
+
+    missing_qids = needed_qids - set(qid_to_path)
+    missing_filenames = {f for f, q in filename_to_qid.items() if q in missing_qids}
+
+    if not missing_qids:
+        logger.info("All %d images already extracted for %s", len(needed_qids), tarball_path.name)
+        return qid_to_path
+
     logger.info(
-        "Resolved %d/%d QIDs to image URLs (%.1f%%).",
-        len(resolved), len(qids), 100 * len(resolved) / max(len(qids), 1),
+        "Extracting %d/%d missing images from %s…",
+        len(missing_qids), len(needed_qids), tarball_path.name,
     )
-    return resolved
+    extracted = 0
+    with tarfile.open(tarball_path, "r:gz") as tf:
+        for member in tqdm(tf, desc=f"scanning {tarball_path.name}", unit="entry", leave=False):
+            if not member.isfile():
+                continue
+            basename = Path(member.name).name
+            qid = _extract_qid(basename)
+
+            match = (qid and qid in missing_qids) or (basename in missing_filenames)
+            if not match:
+                continue
+
+            # Strip directory prefix to extract flat
+            member_copy = member.__class__.frombuf(member.tobuf(), tarfile.ENCODING, "surrogateescape")
+            member_copy.name = basename
+            dest = extract_dir / basename
+
+            try:
+                fileobj = tf.extractfile(member)
+                if fileobj is None:
+                    continue
+                dest.write_bytes(fileobj.read())
+            except Exception as exc:
+                logger.warning("Failed to extract %s: %s", basename, exc)
+                continue
+
+            resolved_qid = qid or filename_to_qid.get(basename)
+            if resolved_qid:
+                qid_to_path[resolved_qid] = dest
+                missing_qids.discard(resolved_qid)
+                extracted += 1
+
+            if not missing_qids:
+                break  # all found, no need to continue scanning
+
+    logger.info("Extracted %d/%d images from %s", extracted, len(needed_qids), tarball_path.name)
+    return qid_to_path
 
 
 # ---------------------------------------------------------------------------
@@ -277,7 +321,7 @@ def download_all(
     languages:    Language codes to collect (subset of LANGUAGES.keys()).
     max_samples:  Maximum samples per language (reservoir-sampled).
     seed:         RNG seed for reservoir sampling.
-    cache_dir:    If set, JSONL files are cached here so re-runs skip re-downloading.
+    cache_dir:    Directory for JSONL and tarball caches (default: DEFAULT_CACHE_DIR).
     countries:    SEA country names to scan (default: all SEA_COUNTRIES).
 
     Returns
@@ -285,6 +329,7 @@ def download_all(
     dict mapping language code -> Path of saved metadata.parquet.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
+    _cache_dir = cache_dir or DEFAULT_CACHE_DIR
 
     # --- Skip languages that are already done ---
     pending: list[str] = []
@@ -304,13 +349,12 @@ def download_all(
     samplers: dict[str, ReservoirSampler] = {
         lang: ReservoirSampler(max_samples, seed) for lang in pending
     }
-
     scan_countries = countries if countries is not None else SEA_COUNTRIES
     session = requests.Session()
 
     # Phase 1: Stream per-country JSONLs and reservoir-sample by language
     for country in scan_countries:
-        logger.info("=== Scanning country: %s ===", country)
+        logger.info("=== Scanning JSONL: %s ===", country)
         records = _stream_country_jsonl(country, session, cache_dir)
 
         for record in records:
@@ -328,7 +372,7 @@ def download_all(
             samplers[lang].add({
                 "language": lang,
                 "entity_id": qid,
-                "image_path": record.get("image", ""),
+                "image_filename": Path(record["image"]).name,
                 "country": country,
                 "question": question,
                 "caption": answer,
@@ -340,16 +384,29 @@ def download_all(
             s = samplers[lang]
             logger.info("  [%s] seen: %d  reservoir: %d", lang, s.total_seen, len(s.samples))
 
-    # Phase 2: Batch-resolve Wikidata QIDs → Wikimedia Commons URLs
-    all_qids = list({
-        s["entity_id"]
-        for lang in pending
-        for s in samplers[lang].samples
-    })
-    url_cache_path = (cache_dir or DEFAULT_CACHE_DIR) / _URL_CACHE_FILE
-    url_map = _resolve_qids_to_urls(all_qids, url_cache_path, session)
+    # Phase 2: Download tarballs and selectively extract needed images per country
+    country_qids: dict[str, set[str]] = {c: set() for c in scan_countries}
+    country_filenames: dict[str, set[str]] = {c: set() for c in scan_countries}
+    for lang in pending:
+        for s in samplers[lang].samples:
+            country_qids[s["country"]].add(s["entity_id"])
+            country_filenames[s["country"]].add(s["image_filename"])
 
-    # Phase 3: Write per-language parquets (dropping samples with no image URL)
+    qid_to_local: dict[str, Path] = {}
+    for country in scan_countries:
+        needed_qids = country_qids[country]
+        if not needed_qids:
+            continue
+        tarball = _download_country_tarball(country, session, _cache_dir)
+        if tarball is None:
+            continue
+        extract_dir = _cache_dir / "images" / country
+        local_map = _extract_needed_images(
+            tarball, needed_qids, country_filenames[country], extract_dir
+        )
+        qid_to_local.update(local_map)
+
+    # Phase 3: Write per-language parquets (dropping samples with no local image)
     for lang in pending:
         sampler = samplers[lang]
         raw_samples = sampler.samples
@@ -363,15 +420,15 @@ def download_all(
 
         rows = []
         for s in raw_samples:
-            url = url_map.get(s["entity_id"])
-            if url:
-                rows.append({**s, "image_url": url})
+            local_path = qid_to_local.get(s["entity_id"])
+            if local_path and local_path.exists():
+                rows.append({**s, "image_path": str(local_path)})
 
         skipped = len(raw_samples) - len(rows)
         if skipped:
-            logger.warning("[%s] %d rows skipped (no Wikimedia image URL)", lang, skipped)
+            logger.warning("[%s] %d rows skipped (image not found in tarball)", lang, skipped)
         if not rows:
-            logger.warning("[%s] No image URLs resolved — skipping", lang)
+            logger.warning("[%s] No matched images — skipping", lang)
             continue
 
         logger.info("[%s] Saving %d rows", lang, len(rows))

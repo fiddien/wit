@@ -38,10 +38,7 @@ OE_REFINED_JSONL_TEMPLATE = (
     f"{HF_BASE_URL}/CulturalGround-Recipes/CulturalGround-Refined-OE/{{country}}_refined.jsonl"
 )
 
-# Wikidata / Wikimedia Commons constants
-WIKIDATA_API_URL = "https://www.wikidata.org/w/api.php"
-WIKIMEDIA_FILEPATH_URL = "https://commons.wikimedia.org/wiki/Special:FilePath/{filename}"
-
-# Wikidata API tuning
-WIKIDATA_BATCH_SIZE = 50       # IDs per request
-WIKIDATA_REQUEST_DELAY = 0.35  # seconds between batches
+# Pre-packaged per-country image tarballs (one .tar.gz per country)
+IMAGE_TARBALL_TEMPLATE = (
+    f"{HF_BASE_URL}/CultureGroundImages/{{country}}.tar.gz"
+)
