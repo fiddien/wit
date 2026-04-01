@@ -316,6 +316,8 @@ def download_all(
             lang = record.get("language", "")
             if lang not in lang_set:
                 continue
+            if not record.get("image"):
+                continue
             qid = _extract_qid(record.get("image", ""))
             if not qid:
                 continue
