@@ -276,9 +276,6 @@ def _extract_needed_images(
             if not match:
                 continue
 
-            # Strip directory prefix to extract flat
-            member_copy = member.__class__.frombuf(member.tobuf(), tarfile.ENCODING, "surrogateescape")
-            member_copy.name = basename
             dest = extract_dir / basename
 
             try:

@@ -53,10 +53,11 @@ def stats_from_parquet(lang_dir: Path) -> dict | None:
         return None
     df = pd.read_parquet(parquet)
     captions = df["caption"].dropna().tolist()
+    image_col = "image_url" if "image_url" in df.columns else "image_path"
     return {
         "source": "parquet",
         "total_rows": len(df),
-        "unique_images": int(df["image_url"].nunique()),
+        "unique_images": int(df[image_col].nunique()) if image_col in df.columns else None,
         "caption_stats": _caption_stats(captions),
     }
 
