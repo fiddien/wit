@@ -17,6 +17,8 @@ import argparse
 import gzip
 import json
 import logging
+import math
+import os
 import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -248,7 +250,7 @@ def download_all(
         pbar.close()
         return shard_idx, shard_rows
 
-    max_workers = min(4, len(files_to_scan))
+    max_workers = min(math.ceil((os.cpu_count() or 4) / 2), len(files_to_scan))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
             executor.submit(_process_shard, shard_idx, url): shard_idx
