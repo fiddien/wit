@@ -25,7 +25,9 @@ import logging
 import random
 import re
 import tarfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from threading import Lock
 
 import pandas as pd
 import requests
@@ -352,37 +354,44 @@ def download_all(
     scan_countries = countries if countries is not None else SEA_COUNTRIES
     session = requests.Session()
 
-    # Phase 1: Stream per-country JSONLs and reservoir-sample by language
-    for country in scan_countries:
+    # Phase 1: Stream per-country JSONLs in parallel and reservoir-sample by language
+    samplers_lock = Lock()
+
+    def _scan_country_jsonl(country: str) -> tuple[str, list[dict]]:
         logger.info("=== Scanning JSONL: %s ===", country)
-        records = _stream_country_jsonl(country, session, cache_dir)
+        return country, _stream_country_jsonl(country, session, cache_dir)
 
-        for record in records:
-            lang = record.get("language", "")
-            if lang not in lang_set:
-                continue
-            if not record.get("image"):
-                continue
-            qid = record.get("id") or _extract_qid(record.get("image", ""))
-            if not qid:
-                continue
-            question, answer = _parse_conversation(record)
-            if not answer:
-                continue
-            samplers[lang].add({
-                "language": lang,
-                "entity_id": qid,
-                "image_filename": Path(record["image"]).name,
-                "country": country,
-                "question": question,
-                "caption": answer,
-                "page_url": f"https://www.wikidata.org/wiki/{qid}",
-                "page_title": qid,
-            })
-
-        for lang in pending:
-            s = samplers[lang]
-            logger.info("  [%s] seen: %d  reservoir: %d", lang, s.total_seen, len(s.samples))
+    max_workers = min(4, len(scan_countries))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_scan_country_jsonl, c): c for c in scan_countries}
+        for future in as_completed(futures):
+            country, records = future.result()
+            for record in records:
+                lang = record.get("language", "")
+                if lang not in lang_set:
+                    continue
+                if not record.get("image"):
+                    continue
+                qid = record.get("id") or _extract_qid(record.get("image", ""))
+                if not qid:
+                    continue
+                question, answer = _parse_conversation(record)
+                if not answer:
+                    continue
+                with samplers_lock:
+                    samplers[lang].add({
+                        "language": lang,
+                        "entity_id": qid,
+                        "image_filename": Path(record["image"]).name,
+                        "country": country,
+                        "question": question,
+                        "caption": answer,
+                        "page_url": f"https://www.wikidata.org/wiki/{qid}",
+                        "page_title": qid,
+                    })
+            for lang in pending:
+                s = samplers[lang]
+                logger.info("  [%s] seen: %d  reservoir: %d", lang, s.total_seen, len(s.samples))
 
     # Phase 2: Download tarballs and selectively extract needed images per country
     country_qids: dict[str, set[str]] = {c: set() for c in scan_countries}
@@ -393,18 +402,24 @@ def download_all(
             country_filenames[s["country"]].add(s["image_filename"])
 
     qid_to_local: dict[str, Path] = {}
-    for country in scan_countries:
+    qid_to_local_lock = Lock()
+
+    def _fetch_and_extract(country: str) -> None:
         needed_qids = country_qids[country]
         if not needed_qids:
-            continue
+            return
         tarball = _download_country_tarball(country, session, _cache_dir)
         if tarball is None:
-            continue
+            return
         extract_dir = _cache_dir / "images" / country
         local_map = _extract_needed_images(
             tarball, needed_qids, country_filenames[country], extract_dir
         )
-        qid_to_local.update(local_map)
+        with qid_to_local_lock:
+            qid_to_local.update(local_map)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        list(executor.map(_fetch_and_extract, scan_countries))
 
     # Phase 3: Write per-language parquets (dropping samples with no local image)
     for lang in pending:

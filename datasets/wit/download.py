@@ -18,7 +18,9 @@ import gzip
 import json
 import logging
 import random
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from threading import Lock
 
 import pandas as pd
 import requests
@@ -217,48 +219,68 @@ def download_all(
     files_to_scan = source_files if source_files is not None else WIT_TRAIN_FILES
     progress_key = f"completed_shards_{len(files_to_scan)}"
     completed_shards: list[int] = progress.get(progress_key, [])
+    completed_shards_lock = Lock()
 
-    for shard_idx, url in enumerate(files_to_scan):
-        if shard_idx in completed_shards:
-            logger.info("Shard %d/%d already done — skipping", shard_idx, len(files_to_scan))
-            continue
-
+    def _process_shard(shard_idx: int, url: str) -> tuple[int, dict[str, list[dict]]]:
+        """Fetch and scan one shard; return per-language rows collected."""
         logger.info("Scanning shard %d/%d: %s", shard_idx + 1, len(files_to_scan), url)
-
         if cache_dir is not None:
             source: str | Path = _fetch_to_cache(url, cache_dir)
         else:
             source = url
-        try:
-            pbar = tqdm(desc=f"Shard {shard_idx:02d}", unit="rows", leave=False)
-            for row in _stream_tsv_gz(source):
-                pbar.update(1)
-                lang = row.get(_LANG_COL, "")
-                if lang not in lang_set:
-                    continue
-                caption = _best_caption(row)
-                if not caption or not row.get(_IMG_COL):
-                    continue
-                samplers[lang].add({
-                    "language": lang,
-                    "image_url": row[_IMG_COL],
-                    "caption": caption,
-                    "page_title": row.get(_TITLE_COL, ""),
-                    "page_url": row.get(_PAGE_COL, ""),
-                })
-            pbar.close()
-        except Exception:
-            logger.exception("Error on shard %d — will retry on next run", shard_idx)
-            _save_progress(_cache_dir, {**progress, progress_key: completed_shards})
-            continue
+        shard_rows: dict[str, list[dict]] = {lang: [] for lang in lang_set}
+        pbar = tqdm(desc=f"Shard {shard_idx:02d}", unit="rows", leave=False)
+        for row in _stream_tsv_gz(source):
+            pbar.update(1)
+            lang = row.get(_LANG_COL, "")
+            if lang not in lang_set:
+                continue
+            caption = _best_caption(row)
+            if not caption or not row.get(_IMG_COL):
+                continue
+            shard_rows[lang].append({
+                "language": lang,
+                "image_url": row[_IMG_COL],
+                "caption": caption,
+                "page_title": row.get(_TITLE_COL, ""),
+                "page_url": row.get(_PAGE_COL, ""),
+            })
+        pbar.close()
+        return shard_idx, shard_rows
 
-        completed_shards.append(shard_idx)
-        _save_progress(_cache_dir, {**progress, progress_key: completed_shards})
-        for lang, sampler in samplers.items():
-            logger.info(
-                "  [%s] rows seen: %d  reservoir: %d",
-                lang, sampler.total_seen, len(sampler.samples),
-            )
+    max_workers = min(4, len(files_to_scan))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(_process_shard, shard_idx, url): shard_idx
+            for shard_idx, url in enumerate(files_to_scan)
+            if shard_idx not in completed_shards
+        }
+        for shard_idx, url in enumerate(files_to_scan):
+            if shard_idx in completed_shards:
+                logger.info("Shard %d/%d already done — skipping", shard_idx, len(files_to_scan))
+
+        for future in as_completed(futures):
+            shard_idx = futures[future]
+            try:
+                shard_idx, shard_rows = future.result()
+            except Exception:
+                logger.exception("Error on shard %d — will retry on next run", shard_idx)
+                with completed_shards_lock:
+                    _save_progress(_cache_dir, {**progress, progress_key: completed_shards})
+                continue
+
+            for lang, rows in shard_rows.items():
+                for item in rows:
+                    samplers[lang].add(item)
+
+            with completed_shards_lock:
+                completed_shards.append(shard_idx)
+                _save_progress(_cache_dir, {**progress, progress_key: completed_shards})
+            for lang, sampler in samplers.items():
+                logger.info(
+                    "  [%s] rows seen: %d  reservoir: %d",
+                    lang, sampler.total_seen, len(sampler.samples),
+                )
 
     # Save parquet files
     for lang in pending:
