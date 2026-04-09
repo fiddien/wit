@@ -194,6 +194,22 @@ async def convert_language(
     total = len(df)
     logger.info("[%s] Converting %d rows to WebDataset shards…", lang, total)
 
+    # Load permanently-failed URLs from a previous run so we skip them.
+    # Only 4xx errors (except 429) are considered permanent; timeouts and
+    # 5xx errors are transient and will be retried.
+    permanent_failures: set[str] = set()
+    if error_log.exists():
+        with error_log.open() as ef:
+            for line in ef:
+                parts = line.rstrip("\n").split("\t", 1)
+                if len(parts) == 2:
+                    url_or_path, reason = parts
+                    # 4xx (except 429) are permanent; skip everything else to retry
+                    if reason.startswith("HTTP 4") and not reason.startswith("HTTP 429"):
+                        permanent_failures.add(url_or_path)
+        if permanent_failures:
+            logger.info("[%s] Skipping %d permanently-failed URLs from errors.log", lang, len(permanent_failures))
+
     # Determine which shards already exist
     existing_shards = set(int(p.stem.split("-")[1]) for p in lang_out.glob("shard-*.tar"))
 
@@ -219,6 +235,11 @@ async def convert_language(
             nonlocal downloaded, failed
             # CulturalGround: image already on disk — no network needed
             local_path = row.get("image_path")
+            url_key = local_path or row.get("image_url", "")
+            if url_key in permanent_failures:
+                pbar.update(1)
+                failed += 1
+                return None
             if local_path:
                 img_bytes, reason = _load_local_image_bytes(local_path)
             else:
