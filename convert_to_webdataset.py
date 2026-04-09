@@ -210,11 +210,10 @@ async def convert_language(
             logger.info("[%s] Skipping %d permanently-failed URLs from errors.log", lang, len(permanent_failures))
             df = df[~df["image_url"].isin(permanent_failures)]
 
-    if max_samples is not None and len(df) > max_samples:
-        logger.info("[%s] Capping %d rows to max_samples=%d", lang, len(df), max_samples)
-        df = df.iloc[:max_samples]
+    if max_samples is not None:
+        logger.info("[%s] Will stop after %d successful downloads", lang, max_samples)
     total = len(df)
-    logger.info("[%s] Converting %d rows to WebDataset shards…", lang, total)
+    logger.info("[%s] Converting up to %d rows to WebDataset shards…", lang, total)
 
     # Determine which shards already exist
     existing_shards = set(int(p.stem.split("-")[1]) for p in lang_out.glob("shard-*.tar"))
@@ -222,6 +221,13 @@ async def convert_language(
     semaphore = asyncio.Semaphore(workers)
 
     async def _bounded_fetch(session, url) -> tuple:
+        # Check cache before acquiring the semaphore to avoid unnecessary throttling.
+        if image_cache_dir is not None:
+            url_hash = hashlib.sha256(url.encode()).hexdigest()
+            cache_path = image_cache_dir / f"{url_hash}.jpg"
+            if cache_path.exists():
+                async with aiofiles.open(cache_path, "rb") as f:
+                    return await f.read(), None
         async with semaphore:
             await asyncio.sleep(REQUEST_DELAY)
             return await _fetch_image_bytes(session, url, image_cache_dir)
@@ -235,23 +241,21 @@ async def convert_language(
     connector = aiohttp.TCPConnector(limit=workers * 2)
     headers = {"User-Agent": "wit-sea-downloader/1.0 (https://github.com/fiddien/wit)"}
     async with aiohttp.ClientSession(connector=connector, headers=headers) as session:
-        pbar = atqdm(total=total, desc=f"[{lang}] downloading", unit="img")
+        pbar = atqdm(total=max_samples or total, desc=f"[{lang}] downloading", unit="img")
 
         async def _process_row(row):
-            nonlocal downloaded, failed
+            nonlocal failed
             # CulturalGround: image already on disk — no network needed
             local_path = row.get("image_path")
             if local_path:
                 img_bytes, reason = _load_local_image_bytes(local_path)
             else:
                 img_bytes, reason = await _bounded_fetch(session, row["image_url"])
-            pbar.update(1)
             if img_bytes is None:
                 async with aiofiles.open(error_log, "a") as ef:
                     await ef.write(f"{local_path or row.get('image_url', '')}\t{reason}\n")
                 failed += 1
                 return None
-            downloaded += 1
             return {
                 "image_bytes": img_bytes,
                 "caption": row["caption"],
@@ -261,23 +265,33 @@ async def convert_language(
                 "language": lang,
             }
 
-        tasks = [_process_row(row) for row in df.to_dict("records")]
-
-        for coro in asyncio.as_completed(tasks):
-            result = await coro
-            if result is None:
-                continue
-            shard_buffer.append(result)
-            if len(shard_buffer) >= shard_size:
-                if shard_num not in existing_shards:
-                    shard_path = lang_out / f"shard-{shard_num:06d}.tar"
-                    _write_shard(shard_path, shard_buffer)
-                    logger.info("[%s] Wrote %s", lang, shard_path.name)
-                else:
-                    logger.info("[%s] Shard %06d already exists — skipping", lang, shard_num)
-                total_shards += 1
-                shard_num += 1
-                shard_buffer = []
+        rows = df.to_dict("records")
+        batch_size = workers * 4  # process in windows to allow early stopping
+        i = 0
+        done = False
+        while i < len(rows) and not done:
+            batch = rows[i: i + batch_size]
+            i += batch_size
+            results = await asyncio.gather(*[_process_row(row) for row in batch])
+            for result in results:
+                if result is None:
+                    continue
+                downloaded += 1
+                pbar.update(1)
+                shard_buffer.append(result)
+                if len(shard_buffer) >= shard_size:
+                    if shard_num not in existing_shards:
+                        shard_path = lang_out / f"shard-{shard_num:06d}.tar"
+                        _write_shard(shard_path, shard_buffer)
+                        logger.info("[%s] Wrote %s", lang, shard_path.name)
+                    else:
+                        logger.info("[%s] Shard %06d already exists — skipping", lang, shard_num)
+                    total_shards += 1
+                    shard_num += 1
+                    shard_buffer = []
+                if max_samples is not None and downloaded >= max_samples:
+                    done = True
+                    break
 
         # Write remaining samples as a partial shard
         if shard_buffer:
