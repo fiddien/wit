@@ -28,7 +28,7 @@ from config import (
     DEFAULT_WORKERS,
 )
 from compute_stats import compute_all_stats, display_stats
-from convert_to_webdataset import convert_all
+from convert_to_webdataset import convert_all, convert_all_img2dataset
 from prepare_training import prepare as prepare_training
 
 # Registry of supported datasets.  Each entry must expose:
@@ -145,6 +145,24 @@ def parse_args() -> argparse.Namespace:
         help="Directory to cache downloaded images to avoid re-fetching on re-runs "
              "(default: %(default)s). Pass an empty string to disable image caching.",
     )
+    parser.add_argument(
+        "--use-img2dataset",
+        action="store_true",
+        help="Use img2dataset for the convert step instead of the built-in aiohttp downloader. "
+             "Faster for large datasets; requires `pip install img2dataset`.",
+    )
+    parser.add_argument(
+        "--img2dataset-threads",
+        type=int,
+        default=64,
+        help="Number of download threads per process when --use-img2dataset is set (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--img2dataset-image-size",
+        type=int,
+        default=512,
+        help="Resize images to this size (longest edge) when --use-img2dataset is set (default: %(default)s)",
+    )
     return parser.parse_args()
 
 
@@ -213,17 +231,33 @@ def main() -> None:
 
     if "convert" in args.steps:
         logger.info("=== Step 2/3: Convert to WebDataset ===")
-        asyncio.run(
-            convert_all(
-                input_dir=args.output_dir / "train",
-                output_dir=args.output_dir / "train",
-                languages=languages,
-                shard_size=args.shard_size,
-                workers=args.workers,
-                language_names=language_names,
-                image_cache_dir=args.image_cache_dir or None,
-            )
-        )
+
+        def _run_convert(input_dir: Path, output_dir: Path) -> None:
+            if args.use_img2dataset:
+                convert_all_img2dataset(
+                    input_dir=input_dir,
+                    output_dir=output_dir,
+                    languages=languages,
+                    shard_size=args.shard_size,
+                    processes_count=args.workers,
+                    thread_count=args.img2dataset_threads,
+                    image_size=args.img2dataset_image_size,
+                    language_names=language_names,
+                )
+            else:
+                asyncio.run(
+                    convert_all(
+                        input_dir=input_dir,
+                        output_dir=output_dir,
+                        languages=languages,
+                        shard_size=args.shard_size,
+                        workers=args.workers,
+                        language_names=language_names,
+                        image_cache_dir=args.image_cache_dir or None,
+                    )
+                )
+
+        _run_convert(args.output_dir / "train", args.output_dir / "train")
 
         # For WIT (full run only), also convert official val and test shards.
         if args.dataset == "wit" and not args.quick_start:
@@ -232,17 +266,7 @@ def main() -> None:
                 if not split_dir.exists():
                     continue
                 logger.info("=== Converting WIT official %s shards ===", split_name)
-                asyncio.run(
-                    convert_all(
-                        input_dir=split_dir,
-                        output_dir=split_dir,
-                        languages=languages,
-                        shard_size=args.shard_size,
-                        workers=args.workers,
-                        language_names=language_names,
-                        image_cache_dir=args.image_cache_dir or None,
-                    )
-                )
+                _run_convert(split_dir, split_dir)
         logger.info("Conversion complete.")
 
     if "stats" in args.steps:

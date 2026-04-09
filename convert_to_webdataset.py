@@ -305,6 +305,113 @@ async def convert_all(
     return summaries
 
 
+# ---------------------------------------------------------------------------
+# img2dataset backend (faster bulk downloader)
+# ---------------------------------------------------------------------------
+
+def convert_language_img2dataset(
+    lang: str,
+    input_dir: Path,
+    output_dir: Path,
+    shard_size: int,
+    processes_count: int = 1,
+    thread_count: int = 64,
+    image_size: int = 512,
+    language_names: dict[str, str] | None = None,
+) -> dict:
+    """
+    Convert the metadata parquet for *lang* to WebDataset shards using
+    img2dataset for high-throughput parallel downloading.
+
+    Output shards are renamed from img2dataset's ``{n:05d}.tar`` convention
+    to the pipeline's ``shard-{n:06d}.tar`` convention.
+    Returns a summary dict with counts.
+    """
+    try:
+        from img2dataset import download as _img2dataset_download
+    except ImportError as exc:
+        raise ImportError(
+            "img2dataset is not installed. Run: pip install img2dataset"
+        ) from exc
+
+    parquet_path = input_dir / lang / "metadata.parquet"
+    if not parquet_path.exists():
+        logger.warning("No metadata found for %s at %s — skipping", lang, parquet_path)
+        return {"language": lang, "total": 0, "downloaded": 0, "shards": 0}
+
+    lang_out = output_dir / lang
+    lang_out.mkdir(parents=True, exist_ok=True)
+    names = language_names or {}
+
+    import pandas as pd
+    total = len(pd.read_parquet(parquet_path, columns=["image_url"]))
+    logger.info("[%s] Downloading %d images via img2dataset (%d threads)…", lang, total, thread_count)
+
+    _img2dataset_download(
+        url_list=str(parquet_path),
+        input_format="parquet",
+        url_col="image_url",
+        caption_col="caption",
+        output_format="webdataset",
+        output_folder=str(lang_out),
+        image_size=image_size,
+        resize_mode="keep_ratio",
+        processes_count=processes_count,
+        thread_count=thread_count,
+        number_sample_per_shard=shard_size,
+        retries=MAX_RETRIES,
+        save_additional_columns=["page_title", "page_url", "language"],
+        disallowed_header_directives=[],
+        user_agent_token="wit-sea-downloader",
+    )
+
+    # Rename img2dataset's {n:05d}.tar → shard-{n:06d}.tar
+    renamed = 0
+    for p in sorted(lang_out.glob("*.tar")):
+        try:
+            n = int(p.stem)
+        except ValueError:
+            continue
+        new_name = lang_out / f"shard-{n:06d}.tar"
+        if not new_name.exists():
+            p.rename(new_name)
+            renamed += 1
+
+    shards = len(list(lang_out.glob("shard-*.tar")))
+    logger.info("[%s] img2dataset done — %d shards written", lang, shards)
+    return {
+        "language": lang,
+        "language_name": names.get(lang, lang),
+        "total_rows": total,
+        "downloaded": -1,   # img2dataset tracks this internally
+        "failed": -1,
+        "shards": shards,
+    }
+
+
+def convert_all_img2dataset(
+    input_dir: Path,
+    output_dir: Path,
+    languages: list[str],
+    shard_size: int,
+    processes_count: int = 1,
+    thread_count: int = 64,
+    image_size: int = 512,
+    language_names: dict[str, str] | None = None,
+) -> list[dict]:
+    summaries = []
+    for lang in languages:
+        summary = convert_language_img2dataset(
+            lang, input_dir, output_dir, shard_size,
+            processes_count=processes_count,
+            thread_count=thread_count,
+            image_size=image_size,
+            language_names=language_names,
+        )
+        summaries.append(summary)
+    return summaries
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Convert WIT parquet metadata to OpenCLIP WebDataset tar shards."
