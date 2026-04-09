@@ -8,7 +8,7 @@ live in their respective datasets/<name>/config.py.
 from pathlib import Path
 
 # Pipeline defaults
-DEFAULT_MAX_SAMPLES = 100_000      # per language
+DEFAULT_MAX_SAMPLES = 10_000      # per language
 DEFAULT_SHARD_SIZE = 10_000
 DEFAULT_WORKERS = 4
 DEFAULT_OUTPUT_DIR = Path("data")
