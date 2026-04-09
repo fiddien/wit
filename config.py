@@ -18,7 +18,8 @@ DEFAULT_IMAGE_CACHE_DIR = Path("cache") / "images"  # local cache for downloaded
 
 # HTTP settings for image downloads
 REQUEST_TIMEOUT = 300              # seconds
-REQUEST_DELAY = 0.2                # seconds between requests per worker (throttle)
+REQUEST_DELAY = 0.2                # seconds between requests per worker (throttle, legacy)
+WIKIMEDIA_RATE_LIMIT = 15          # max requests per second (Wikimedia policy)
 MAX_RETRIES = 3
 RETRY_BACKOFF = 2.0                # seconds between retries
 

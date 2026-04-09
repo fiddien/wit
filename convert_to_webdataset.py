@@ -44,6 +44,7 @@ from config import (
     REQUEST_TIMEOUT,
     RETRY_BACKOFF,
     TEXT_EXT,
+    WIKIMEDIA_RATE_LIMIT,
 )
 
 logging.basicConfig(
@@ -52,6 +53,33 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Rate limiter (token bucket)
+# ---------------------------------------------------------------------------
+
+class _RateLimiter:
+    """Async token-bucket rate limiter."""
+
+    def __init__(self, rate: float) -> None:
+        self._rate = rate          # tokens per second
+        self._tokens = rate
+        self._last = asyncio.get_event_loop().time()
+        self._lock = asyncio.Lock()
+
+    async def acquire(self) -> None:
+        async with self._lock:
+            now = asyncio.get_event_loop().time()
+            elapsed = now - self._last
+            self._last = now
+            self._tokens = min(self._rate, self._tokens + elapsed * self._rate)
+            if self._tokens < 1:
+                wait = (1 - self._tokens) / self._rate
+                await asyncio.sleep(wait)
+                self._tokens = 0
+            else:
+                self._tokens -= 1
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +247,7 @@ async def convert_language(
     existing_shards = set(int(p.stem.split("-")[1]) for p in lang_out.glob("shard-*.tar"))
 
     semaphore = asyncio.Semaphore(workers)
+    rate_limiter = _RateLimiter(WIKIMEDIA_RATE_LIMIT)
 
     async def _bounded_fetch(session, url) -> tuple:
         # Check cache before acquiring the semaphore to avoid unnecessary throttling.
@@ -229,7 +258,7 @@ async def convert_language(
                 async with aiofiles.open(cache_path, "rb") as f:
                     return await f.read(), None
         async with semaphore:
-            await asyncio.sleep(REQUEST_DELAY)
+            await rate_limiter.acquire()  # global 15 req/s cap (Wikimedia policy)
             return await _fetch_image_bytes(session, url, image_cache_dir)
 
     downloaded = 0
