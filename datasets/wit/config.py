@@ -7,13 +7,14 @@ LANGUAGES = {
     "id": "Indonesian",
     "vi": "Vietnamese",
     "th": "Thai",
-    "tl": "Tagalog",
     "ms": "Malay",
-    # "km": "Khmer",
     "my": "Burmese",
-    "lo": "Lao",
     "jv": "Javanese",
-    "su": "Sundanese",
+    # not present in WIT shards
+    # "tl": "Tagalog",
+    # "km": "Khmer",
+    # "lo": "Lao",
+    # "su": "Sundanese",
     # "ceb": "Cebuano",
 }
 
