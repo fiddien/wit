@@ -239,7 +239,7 @@ async def convert_language(
     total_shards = 0
 
     connector = aiohttp.TCPConnector(limit=workers * 2)
-    headers = {"User-Agent": "wit-sea-downloader/1.0 (https://github.com/fiddien/wit)"}
+    headers = {"User-Agent": "wit-sea-downloader/1.0 (https://github.com/fiddien/wit; mailto:ilmaaliyaf@gmail.com) Python-aiohttp"}
     async with aiohttp.ClientSession(connector=connector, headers=headers) as session:
         pbar = atqdm(total=max_samples or total, desc=f"[{lang}] downloading", unit="img")
 
@@ -425,7 +425,7 @@ def convert_language_img2dataset(
         retries=MAX_RETRIES,
         save_additional_columns=["page_title", "page_url", "language"],
         disallowed_header_directives=[],
-        user_agent_token="wit-sea-downloader",
+        user_agent_token="wit-sea-downloader/1.0 (https://github.com/fiddien/wit; mailto:fiddien@wikimedia.org)",
     )
 
     if _tmp_parquet:
