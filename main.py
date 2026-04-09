@@ -243,6 +243,7 @@ def main() -> None:
                     thread_count=args.img2dataset_threads,
                     image_size=args.img2dataset_image_size,
                     language_names=language_names,
+                    max_samples=args.max_samples,
                 )
             else:
                 asyncio.run(
@@ -254,6 +255,7 @@ def main() -> None:
                         workers=args.workers,
                         language_names=language_names,
                         image_cache_dir=args.image_cache_dir or None,
+                        max_samples=args.max_samples,
                     )
                 )
 

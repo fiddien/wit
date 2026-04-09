@@ -175,6 +175,7 @@ async def convert_language(
     workers: int,
     language_names: dict[str, str] | None = None,
     image_cache_dir: Path | None = None,
+    max_samples: int | None = None,
 ) -> dict:
     """
     Convert the metadata parquet for *lang* to WebDataset shards.
@@ -191,8 +192,6 @@ async def convert_language(
     names = language_names or {}
 
     df = pd.read_parquet(parquet_path)
-    total = len(df)
-    logger.info("[%s] Converting %d rows to WebDataset shards…", lang, total)
 
     # Load permanently-failed URLs from a previous run so we skip them.
     # Only 4xx errors (except 429) are considered permanent; timeouts and
@@ -209,6 +208,13 @@ async def convert_language(
                         permanent_failures.add(url_or_path)
         if permanent_failures:
             logger.info("[%s] Skipping %d permanently-failed URLs from errors.log", lang, len(permanent_failures))
+            df = df[~df["image_url"].isin(permanent_failures)]
+
+    if max_samples is not None and len(df) > max_samples:
+        logger.info("[%s] Capping %d rows to max_samples=%d", lang, len(df), max_samples)
+        df = df.iloc[:max_samples]
+    total = len(df)
+    logger.info("[%s] Converting %d rows to WebDataset shards…", lang, total)
 
     # Determine which shards already exist
     existing_shards = set(int(p.stem.split("-")[1]) for p in lang_out.glob("shard-*.tar"))
@@ -235,11 +241,6 @@ async def convert_language(
             nonlocal downloaded, failed
             # CulturalGround: image already on disk — no network needed
             local_path = row.get("image_path")
-            url_key = local_path or row.get("image_url", "")
-            if url_key in permanent_failures:
-                pbar.update(1)
-                failed += 1
-                return None
             if local_path:
                 img_bytes, reason = _load_local_image_bytes(local_path)
             else:
@@ -315,12 +316,14 @@ async def convert_all(
     workers: int,
     language_names: dict[str, str] | None = None,
     image_cache_dir: Path | None = None,
+    max_samples: int | None = None,
 ) -> list[dict]:
     summaries = []
     for lang in languages:
         summary = await convert_language(
             lang, input_dir, output_dir, shard_size, workers, language_names,
             image_cache_dir=image_cache_dir,
+            max_samples=max_samples,
         )
         summaries.append(summary)
     return summaries
@@ -338,6 +341,7 @@ def convert_language_img2dataset(
     processes_count: int = 1,
     thread_count: int = 64,
     image_size: int = 512,
+    max_samples: int | None = None,
     language_names: dict[str, str] | None = None,
 ) -> dict:
     """
@@ -365,11 +369,25 @@ def convert_language_img2dataset(
     names = language_names or {}
 
     import pandas as pd
-    total = len(pd.read_parquet(parquet_path, columns=["image_url"]))
+    import tempfile
+    df = pd.read_parquet(parquet_path)
+    if max_samples is not None and len(df) > max_samples:
+        logger.info("[%s] Capping %d rows to max_samples=%d", lang, len(df), max_samples)
+        df = df.iloc[:max_samples]
+    total = len(df)
     logger.info("[%s] Downloading %d images via img2dataset (%d threads)…", lang, total, thread_count)
 
+    # img2dataset reads directly from a parquet file; write a temp file if we capped.
+    _tmp_parquet = None
+    url_list_path = str(parquet_path)
+    if max_samples is not None and total < len(pd.read_parquet(parquet_path, columns=["image_url"])):
+        _tmp = tempfile.NamedTemporaryFile(suffix=".parquet", delete=False)
+        df.to_parquet(_tmp.name, index=False)
+        url_list_path = _tmp.name
+        _tmp_parquet = _tmp.name
+
     _img2dataset_download(
-        url_list=str(parquet_path),
+        url_list=url_list_path,
         input_format="parquet",
         url_col="image_url",
         caption_col="caption",
@@ -385,6 +403,10 @@ def convert_language_img2dataset(
         disallowed_header_directives=[],
         user_agent_token="wit-sea-downloader",
     )
+
+    if _tmp_parquet:
+        import os
+        os.unlink(_tmp_parquet)
 
     # Rename img2dataset's {n:05d}.tar → shard-{n:06d}.tar
     renamed = 0
@@ -419,6 +441,7 @@ def convert_all_img2dataset(
     thread_count: int = 64,
     image_size: int = 512,
     language_names: dict[str, str] | None = None,
+    max_samples: int | None = None,
 ) -> list[dict]:
     summaries = []
     for lang in languages:
@@ -428,6 +451,7 @@ def convert_all_img2dataset(
             thread_count=thread_count,
             image_size=image_size,
             language_names=language_names,
+            max_samples=max_samples,
         )
         summaries.append(summary)
     return summaries

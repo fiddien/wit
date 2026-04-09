@@ -8,3 +8,4 @@ tabulate
 cairosvg
 Pillow
 pyarrow
+img2dataset
