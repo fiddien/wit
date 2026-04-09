@@ -266,6 +266,16 @@ async def convert_language(
             }
 
         rows = df.to_dict("records")
+
+        # Prioritize rows whose images are already cached so we reach max_samples
+        # faster and avoid unnecessary network requests when the cache is warm.
+        if image_cache_dir is not None:
+            def _is_cached(row) -> bool:
+                url = row.get("image_url") or row.get("image_path", "")
+                url_hash = hashlib.sha256(url.encode()).hexdigest()
+                return (image_cache_dir / f"{url_hash}.jpg").exists()
+            rows = sorted(rows, key=_is_cached, reverse=True)
+
         batch_size = workers * 4  # process in windows to allow early stopping
         i = 0
         done = False
