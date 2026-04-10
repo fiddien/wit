@@ -1,10 +1,14 @@
 """
-Compute and display statistics for the WIT Southeast Asian languages dataset.
+Compute and display statistics for all datasets under <data_dir>.
 
-Reads WebDataset tar shards and the metadata parquet files under <data_dir>.
+Expected layout:
+  <data_dir>/<source>/<split>/<lang>/shard-*.tar
+  <data_dir>/<source>/train/<lang>/metadata.parquet   (optional)
+  <data_dir>/<source>/<split>/<lang>/errors.log        (optional)
+
 Outputs:
-  - Per-language stats.json
-  - Cross-language summary_stats.json
+  - <data_dir>/<source>/<lang>/stats.json   per-(source, language) stats
+  - <data_dir>/summary_stats.json           cross-language summary
   - Human-readable table printed to stdout
 """
 
@@ -25,6 +29,8 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+
+SPLITS = ("train", "val", "test")
 
 
 def _caption_stats(captions: list[str]) -> dict:
@@ -47,7 +53,7 @@ def _caption_stats(captions: list[str]) -> dict:
 
 
 def stats_from_parquet(lang_dir: Path) -> dict | None:
-    """Compute stats from the metadata parquet (pre-download)."""
+    """Compute stats from the metadata parquet (pre-download). Parquet lives in the train split dir."""
     parquet = lang_dir / "metadata.parquet"
     if not parquet.exists():
         return None
@@ -62,66 +68,98 @@ def stats_from_parquet(lang_dir: Path) -> dict | None:
     }
 
 
-def stats_from_shards(lang_dir: Path) -> dict | None:
-    """Compute stats by scanning WebDataset tar shards."""
-    shards = sorted(lang_dir.glob("shard-*.tar"))
-    if not shards:
+def stats_from_shards(dirs_by_split: dict[str, Path]) -> dict | None:
+    """Compute stats by scanning shard dirs across all splits."""
+    splits_data: dict[str, dict] = {}
+    all_captions: list[str] = []
+
+    for split in SPLITS:
+        lang_dir = dirs_by_split.get(split)
+        if lang_dir is None:
+            continue
+        shards = sorted(lang_dir.glob("shard-*.tar"))
+        if not shards:
+            continue
+
+        captions: list[str] = []
+        failed_reads = 0
+        for shard_path in shards:
+            try:
+                with tarfile.open(shard_path, "r") as tf:
+                    for m in tf.getmembers():
+                        if m.name.endswith(".txt"):
+                            f = tf.extractfile(m)
+                            if f:
+                                captions.append(f.read().decode("utf-8", errors="replace").strip())
+            except Exception as exc:
+                logger.warning("Could not read shard %s: %s", shard_path, exc)
+                failed_reads += 1
+
+        error_log = lang_dir / "errors.log"
+        failed_downloads = sum(1 for _ in error_log.open()) if error_log.exists() else 0
+
+        splits_data[split] = {
+            "shards": len(shards),
+            "samples": len(captions),
+            "failed_downloads": failed_downloads,
+            "failed_shard_reads": failed_reads,
+        }
+        all_captions.extend(captions)
+
+    if not splits_data:
         return None
 
-    total_samples = 0
-    captions: list[str] = []
-    failed_reads = 0
-
-    for shard_path in shards:
-        try:
-            with tarfile.open(shard_path, "r") as tf:
-                members = tf.getmembers()
-                txt_members = [m for m in members if m.name.endswith(".txt")]
-                for m in txt_members:
-                    f = tf.extractfile(m)
-                    if f:
-                        captions.append(f.read().decode("utf-8", errors="replace").strip())
-                        total_samples += 1
-        except Exception as exc:
-            logger.warning("Could not read shard %s: %s", shard_path, exc)
-            failed_reads += 1
-
-    error_log = lang_dir / "errors.log"
-    failed_downloads = 0
-    if error_log.exists():
-        failed_downloads = sum(1 for _ in error_log.open())
-
+    total_shards = sum(s["shards"] for s in splits_data.values())
+    total_samples = sum(s["samples"] for s in splits_data.values())
     return {
         "source": "shards",
-        "total_shards": len(shards),
+        "total_shards": total_shards,
         "total_samples": total_samples,
-        "failed_downloads": failed_downloads,
-        "failed_shard_reads": failed_reads,
-        "caption_stats": _caption_stats(captions),
+        "splits": splits_data,
+        "caption_stats": _caption_stats(all_captions),
     }
 
 
 def compute_language_stats(
     lang: str,
-    data_dir: Path,
+    source_dir: Path,
     language_names: dict[str, str] | None = None,
 ) -> dict:
-    lang_dir = data_dir / lang
+    """Compute stats for a (source, language) pair, aggregating across splits."""
     names = language_names or {}
     stats: dict = {
         "language": lang,
         "language_name": names.get(lang, lang),
+        "source": source_dir.name,
     }
 
-    parquet_stats = stats_from_parquet(lang_dir)
+    # Parquet lives in the train split directory
+    train_lang_dir = source_dir / "train" / lang
+    parquet_stats = stats_from_parquet(train_lang_dir)
     if parquet_stats:
         stats["metadata"] = parquet_stats
 
-    shard_stats = stats_from_shards(lang_dir)
+    dirs_by_split = {
+        split_dir.name: split_dir / lang
+        for split_dir in source_dir.iterdir()
+        if split_dir.is_dir() and split_dir.name in SPLITS and (split_dir / lang).is_dir()
+    }
+    shard_stats = stats_from_shards(dirs_by_split)
     if shard_stats:
         stats["webdataset"] = shard_stats
 
     return stats
+
+
+def discover_source_lang_pairs(data_dir: Path) -> list[tuple[Path, str]]:
+    """Return sorted (source_dir, lang) pairs that have at least one shard."""
+    pairs: set[tuple[Path, str]] = set()
+    for shard in data_dir.glob("*/*/*/shard-*.tar"):
+        parts = shard.relative_to(data_dir).parts
+        # expected: source / split / lang / shard-*.tar
+        if len(parts) == 4 and parts[1] in SPLITS:
+            pairs.add((data_dir / parts[0], parts[2]))
+    return sorted(pairs, key=lambda t: (t[0].name, t[1]))
 
 
 def _build_summary_table(all_stats: list[dict]) -> list[list]:
@@ -129,19 +167,27 @@ def _build_summary_table(all_stats: list[dict]) -> list[list]:
     for s in all_stats:
         lang = s["language"]
         lang_name = s["language_name"]
+        source = s.get("source", "?")
         meta = s.get("metadata", {})
         wds = s.get("webdataset", {})
 
         total_rows = meta.get("total_rows", "—")
         total_samples = wds.get("total_samples", "—")
-        failed = wds.get("failed_downloads", "—")
         shards = wds.get("total_shards", "—")
+
+        # Per-split breakdown
+        splits = wds.get("splits", {})
+        train_s = splits.get("train", {}).get("samples", "—")
+        val_s = splits.get("val", {}).get("samples", "—")
+        test_s = splits.get("test", {}).get("samples", "—")
+        failed = sum(sp.get("failed_downloads", 0) for sp in splits.values()) or "—"
 
         cap_stats = wds.get("caption_stats") or meta.get("caption_stats") or {}
         mean_words = cap_stats.get("mean_words", "—")
         mean_chars = cap_stats.get("mean_chars", "—")
 
-        rows.append([lang, lang_name, total_rows, total_samples, failed, shards, mean_words, mean_chars])
+        rows.append([source, lang, lang_name, total_rows, total_samples,
+                     train_s, val_s, test_s, failed, shards, mean_words, mean_chars])
     return rows
 
 
@@ -149,8 +195,9 @@ def display_stats(all_stats: list[dict]) -> None:
     """Print a formatted statistics table to stdout."""
     table = _build_summary_table(all_stats)
     headers = [
-        "Code", "Language", "Metadata\nRows", "Downloaded\nSamples",
-        "Failed\nDownloads", "Shards", "Avg Caption\nWords", "Avg Caption\nChars",
+        "Source", "Code", "Language", "Metadata\nRows", "Total\nSamples",
+        "Train", "Val", "Test", "Failed\nDownloads", "Shards",
+        "Avg Caption\nWords", "Avg Caption\nChars",
     ]
     print("\n" + "=" * 80)
     print("  Dataset Statistics")
@@ -166,6 +213,7 @@ def display_stats(all_stats: list[dict]) -> None:
         cs = wds.get("caption_stats") or meta.get("caption_stats") or {}
         if cs.get("count", 0):
             cap_rows.append([
+                s.get("source", "?"),
                 s["language"],
                 s["language_name"],
                 cs.get("min_chars", "—"),
@@ -176,7 +224,7 @@ def display_stats(all_stats: list[dict]) -> None:
     if cap_rows:
         print(tabulate(
             cap_rows,
-            headers=["Code", "Language", "Min", "Median", "Mean", "Max"],
+            headers=["Source", "Code", "Language", "Min", "Median", "Mean", "Max"],
             tablefmt="rounded_outline",
             numalign="right",
         ))
@@ -185,17 +233,24 @@ def display_stats(all_stats: list[dict]) -> None:
 
 def compute_all_stats(
     data_dir: Path,
-    languages: list[str],
+    languages: list[str] | None = None,
     language_names: dict[str, str] | None = None,
 ) -> list[dict]:
+    pairs = discover_source_lang_pairs(data_dir)
+    if languages:
+        pairs = [(src, lang) for src, lang in pairs if lang in languages]
+
+    if not pairs:
+        logger.warning("No (source, lang) pairs with shards found under %s", data_dir)
+
     all_stats = []
-    for lang in languages:
-        logger.info("Computing stats for %s…", lang)
-        stats = compute_language_stats(lang, data_dir, language_names)
+    for source_dir, lang in pairs:
+        logger.info("Computing stats for %s/%s…", source_dir.name, lang)
+        stats = compute_language_stats(lang, source_dir, language_names)
         all_stats.append(stats)
 
-        # Save per-language stats
-        lang_stats_path = data_dir / lang / "stats.json"
+        # Save per-(source, lang) stats
+        lang_stats_path = source_dir / lang / "stats.json"
         lang_stats_path.parent.mkdir(parents=True, exist_ok=True)
         with lang_stats_path.open("w") as f:
             json.dump(stats, f, ensure_ascii=False, indent=2)
@@ -231,8 +286,5 @@ def parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     args = parse_args()
-    languages = args.languages or [
-        p.parent.name for p in args.data_dir.glob("*/metadata.parquet")
-    ]
-    all_stats = compute_all_stats(args.data_dir, languages)
+    all_stats = compute_all_stats(args.data_dir, languages=args.languages)
     display_stats(all_stats)
