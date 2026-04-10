@@ -186,8 +186,11 @@ def _build_summary_table(all_stats: list[dict]) -> list[list]:
         mean_words = cap_stats.get("mean_words", "—")
         mean_chars = cap_stats.get("mean_chars", "—")
 
-        rows.append([source, lang, lang_name, total_rows, total_samples,
-                     train_s, val_s, test_s, failed, shards, mean_words, mean_chars])
+        rows.append([source, lang, lang_name,
+                    #  total_rows, total_samples,
+                     train_s, val_s, test_s,
+                    #  failed,
+                     shards, mean_words, mean_chars])
     return rows
 
 
@@ -195,8 +198,11 @@ def display_stats(all_stats: list[dict]) -> None:
     """Print a formatted statistics table to stdout."""
     table = _build_summary_table(all_stats)
     headers = [
-        "Source", "Code", "Language", "Metadata\nRows", "Total\nSamples",
-        "Train", "Val", "Test", "Failed\nDownloads", "Shards",
+        "Source", "Code", "Language",
+        # "Metadata\nRows", "Total\nSamples",
+        "Train", "Val", "Test",
+        # "Failed\nDownloads",
+        "Shards",
         "Avg Caption\nWords", "Avg Caption\nChars",
     ]
     print("\n" + "=" * 80)
