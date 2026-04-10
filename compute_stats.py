@@ -194,6 +194,67 @@ def _build_summary_table(all_stats: list[dict]) -> list[list]:
     return rows
 
 
+def _int_or_zero(v) -> int:
+    return v if isinstance(v, int) else 0
+
+
+def _build_by_language_table(all_stats: list[dict]) -> list[list]:
+    """Aggregate stats across all sources, grouped by language code."""
+    from collections import defaultdict
+
+    agg: dict[str, dict] = defaultdict(lambda: {
+        "language_name": "",
+        "train": 0, "val": 0, "test": 0, "total": 0, "shards": 0,
+    })
+    for s in all_stats:
+        lang = s["language"]
+        agg[lang]["language_name"] = s["language_name"]
+        wds = s.get("webdataset", {})
+        splits = wds.get("splits", {})
+        agg[lang]["train"] += _int_or_zero(splits.get("train", {}).get("samples", 0))
+        agg[lang]["val"] += _int_or_zero(splits.get("val", {}).get("samples", 0))
+        agg[lang]["test"] += _int_or_zero(splits.get("test", {}).get("samples", 0))
+        agg[lang]["total"] += _int_or_zero(wds.get("total_samples", 0))
+        agg[lang]["shards"] += _int_or_zero(wds.get("total_shards", 0))
+
+    rows = []
+    for lang in sorted(agg):
+        a = agg[lang]
+        rows.append([lang, a["language_name"], a["train"], a["val"], a["test"], a["total"], a["shards"]])
+    return rows
+
+
+def _build_total_table(all_stats: list[dict]) -> list[list]:
+    """Single-row grand totals and per-split source-level breakdown."""
+    from collections import defaultdict
+
+    # per-source totals
+    src_agg: dict[str, dict] = defaultdict(lambda: {"train": 0, "val": 0, "test": 0, "total": 0, "shards": 0})
+    grand = {"train": 0, "val": 0, "test": 0, "total": 0, "shards": 0}
+
+    for s in all_stats:
+        source = s.get("source", "?")
+        wds = s.get("webdataset", {})
+        splits = wds.get("splits", {})
+        for split in SPLITS:
+            n = _int_or_zero(splits.get(split, {}).get("samples", 0))
+            src_agg[source][split] += n
+            grand[split] += n
+        total = _int_or_zero(wds.get("total_samples", 0))
+        shards = _int_or_zero(wds.get("total_shards", 0))
+        src_agg[source]["total"] += total
+        src_agg[source]["shards"] += shards
+        grand["total"] += total
+        grand["shards"] += shards
+
+    rows = []
+    for src in sorted(src_agg):
+        a = src_agg[src]
+        rows.append([src, a["train"], a["val"], a["test"], a["total"], a["shards"]])
+    rows.append(["TOTAL", grand["train"], grand["val"], grand["test"], grand["total"], grand["shards"]])
+    return rows
+
+
 def display_stats(all_stats: list[dict]) -> None:
     """Print a formatted statistics table to stdout."""
     table = _build_summary_table(all_stats)
@@ -209,6 +270,28 @@ def display_stats(all_stats: list[dict]) -> None:
     print("  Dataset Statistics")
     print("=" * 80)
     print(tabulate(table, headers=headers, tablefmt="rounded_outline", numalign="right"))
+
+    # By-language table
+    by_lang = _build_by_language_table(all_stats)
+    if by_lang:
+        print("\n--- By Language (all sources combined) ---")
+        print(tabulate(
+            by_lang,
+            headers=["Code", "Language", "Train", "Val", "Test", "Total", "Shards"],
+            tablefmt="rounded_outline",
+            numalign="right",
+        ))
+
+    # Totals table
+    totals = _build_total_table(all_stats)
+    if totals:
+        print("\n--- Totals by Source ---")
+        print(tabulate(
+            totals,
+            headers=["Source", "Train", "Val", "Test", "Total", "Shards"],
+            tablefmt="rounded_outline",
+            numalign="right",
+        ))
 
     # Per-language caption detail
     print("\n--- Caption Length Detail (characters) ---")
