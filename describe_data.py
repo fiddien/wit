@@ -1,12 +1,13 @@
 """
 Describe the state of all datasets under the data/ directory.
 
-Reads manifest.json, stats.json files, and scans for tar shards on disk.
+Directly scans data/<source>/<split>/<lang>/shard-*.tar on disk.
+Also reads stats.json files when present.
 Prints a human-readable summary to stdout.
 """
 
 import json
-import os
+from collections import defaultdict
 from pathlib import Path
 
 try:
@@ -16,6 +17,7 @@ except ImportError:
     HAS_TABULATE = False
 
 DATA_DIR = Path(__file__).parent / "data"
+SPLITS = ("train", "val", "test")
 
 
 def fmt_size(n_bytes: int) -> str:
@@ -24,10 +26,6 @@ def fmt_size(n_bytes: int) -> str:
             return f"{n_bytes:.1f} {unit}"
         n_bytes /= 1024
     return f"{n_bytes:.1f} TB"
-
-
-def dir_size(path: Path) -> int:
-    return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
 
 
 def print_table(rows, headers):
@@ -43,95 +41,65 @@ def print_table(rows, headers):
             print(fmt.format(*row))
 
 
-# ── 1. Manifest overview ──────────────────────────────────────────────────────
+# ── 1. Scan shards on disk ────────────────────────────────────────────────────
+# Expected layout: data/<source>/<split>/<lang>/shard-*.tar
 
-manifest_path = DATA_DIR / "manifest.json"
-if not manifest_path.exists():
-    print(f"[ERROR] manifest.json not found in {DATA_DIR}")
-    raise SystemExit(1)
+# source -> split -> lang -> [Path, ...]
+found: dict[str, dict[str, dict[str, list[Path]]]] = defaultdict(
+    lambda: defaultdict(lambda: defaultdict(list))
+)
 
-manifest = json.loads(manifest_path.read_text())
+for source_dir in sorted(DATA_DIR.iterdir()):
+    if not source_dir.is_dir():
+        continue
+    for split_dir in sorted(source_dir.iterdir()):
+        if not split_dir.is_dir() or split_dir.name not in SPLITS:
+            continue
+        for lang_dir in sorted(split_dir.iterdir()):
+            if not lang_dir.is_dir():
+                continue
+            shards = sorted(lang_dir.glob("shard-*.tar"))
+            if shards:
+                found[source_dir.name][split_dir.name][lang_dir.name] = shards
+
+# ── 2. Shard breakdown ────────────────────────────────────────────────────────
 
 print("=" * 60)
-print("DATASET MANIFEST")
+print("SHARD BREAKDOWN (scanned from disk)")
 print("=" * 60)
-print(f"  Version   : {manifest.get('version')}")
-print(f"  Created   : {manifest.get('created')}")
-print(f"  Sources   : {', '.join(manifest.get('sources', []))}")
-lang_map = manifest.get("languages", {})
-print(f"  Languages : {', '.join(f'{k} ({v})' for k, v in lang_map.items())}")
 
-summary = manifest.get("summary", {})
-print()
-print("  Split summary:")
-split_rows = []
-for split, info in summary.items():
-    split_rows.append([
-        split,
-        info.get("total_shards", "?"),
-        f"{info.get('total_samples', 0):,}",
-    ])
-print_table(split_rows, ["Split", "Shards", "Samples"])
+if not found:
+    print("  No shards found. Expected: data/<source>/<split>/<lang>/shard-*.tar")
+else:
+    split_totals: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))  # split -> {shards, size}
+    shard_rows = []
+    total_size = 0
 
-# ── 2. Sampling weights ───────────────────────────────────────────────────────
+    for source in sorted(found):
+        for split in SPLITS:
+            if split not in found[source]:
+                continue
+            for lang in sorted(found[source][split]):
+                shard_paths = found[source][split][lang]
+                n = len(shard_paths)
+                size = sum(p.stat().st_size for p in shard_paths)
+                total_size += size
+                split_totals[split]["shards"] += n
+                split_totals[split]["size"] += size
+                shard_rows.append([source, split, lang, n, fmt_size(size)])
 
-weights = manifest.get("sampling_weights", {})
-if weights:
+    print_table(shard_rows, ["Source", "Split", "Lang", "Shards", "Size"])
+
     print()
-    print("  Sampling weights (trained):")
-    w_rows = [[lang, lang_map.get(lang, lang), f"{w:.4f}"] for lang, w in weights.items()]
-    print_table(w_rows, ["Lang", "Name", "Weight"])
+    print("  Split totals:")
+    tot_rows = [
+        [sp, split_totals[sp]["shards"], fmt_size(split_totals[sp]["size"])]
+        for sp in SPLITS if sp in split_totals
+    ]
+    print_table(tot_rows, ["Split", "Shards", "Size"])
+    print(f"\n  Total shard data on disk: {fmt_size(total_size)}")
 
-# ── 3. Per-source / per-split breakdown from manifest shards ─────────────────
-
-shards = manifest.get("shards", [])
-# Aggregate: source -> split -> language -> samples
-from collections import defaultdict
-agg = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
-shard_count = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
-for s in shards:
-    agg[s["source"]][s["split"]][s["language"]] += s["n_samples"]
-    shard_count[s["source"]][s["split"]][s["language"]] += 1
-
-print()
-print("=" * 60)
-print("SHARD BREAKDOWN (from manifest)")
-print("=" * 60)
-shard_rows = []
-for source in sorted(agg):
-    for split in sorted(agg[source]):
-        for lang in sorted(agg[source][split]):
-            shard_rows.append([
-                source, split, lang,
-                shard_count[source][split][lang],
-                f"{agg[source][split][lang]:,}",
-            ])
-print_table(shard_rows, ["Source", "Split", "Lang", "Shards", "Samples"])
-
-# ── 4. Disk state: which shards actually exist ────────────────────────────────
-
-print()
-print("=" * 60)
-print("DISK STATE")
-print("=" * 60)
-
-disk_rows = []
-total_size = 0
-for s in shards:
-    p = DATA_DIR.parent / s["path"]
-    exists = p.exists()
-    size = p.stat().st_size if exists else 0
-    total_size += size
-    disk_rows.append([
-        s["source"], s["split"], s["language"],
-        "✓" if exists else "✗",
-        fmt_size(size) if exists else "-",
-    ])
-
-print_table(disk_rows, ["Source", "Split", "Lang", "On disk", "Size"])
-print(f"\n  Total shard data on disk: {fmt_size(total_size)}")
-
-# ── 5. Per-language stats from stats.json files ───────────────────────────────
+# ── 3. Per-language stats from stats.json files ───────────────────────────────
 
 print()
 print("=" * 60)
@@ -146,10 +114,7 @@ else:
     for sf in stats_files:
         rel = sf.relative_to(DATA_DIR)
         data = json.loads(sf.read_text())
-        if isinstance(data, list):
-            entries = data
-        else:
-            entries = [data]
+        entries = data if isinstance(data, list) else [data]
         for entry in entries:
             lang = entry.get("language", "?")
             wd = entry.get("webdataset", {})
@@ -166,7 +131,26 @@ else:
             ])
     print_table(stats_rows, ["Path", "Lang", "Samples", "Shards", "Failed DL", "Avg words"])
 
-# ── 6. Error logs ─────────────────────────────────────────────────────────────
+# ── 4. Manifest (optional) ────────────────────────────────────────────────────
+
+manifest_path = DATA_DIR / "manifest.json"
+if manifest_path.exists():
+    manifest = json.loads(manifest_path.read_text())
+    print()
+    print("=" * 60)
+    print("MANIFEST METADATA")
+    print("=" * 60)
+    print(f"  Version : {manifest.get('version')}")
+    print(f"  Created : {manifest.get('created')}")
+    weights = manifest.get("sampling_weights", {})
+    if weights:
+        lang_map = manifest.get("languages", {})
+        print()
+        print("  Sampling weights:")
+        w_rows = [[lang, lang_map.get(lang, lang), f"{w:.4f}"] for lang, w in weights.items()]
+        print_table(w_rows, ["Lang", "Name", "Weight"])
+
+# ── 5. Error logs ─────────────────────────────────────────────────────────────
 
 error_logs = sorted(DATA_DIR.rglob("errors.log"))
 if error_logs:
