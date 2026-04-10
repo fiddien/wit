@@ -152,6 +152,8 @@ if manifest_path.exists():
 
 # ── 5. Error logs ─────────────────────────────────────────────────────────────
 
+exit()
+
 error_logs = sorted(DATA_DIR.rglob("errors.log"))
 if error_logs:
     print()
